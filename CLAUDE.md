@@ -17,6 +17,7 @@ src/
     data/
         __init__.py
         fetch_electricity.py   # ENTSO-E day-ahead prices (all zones)
+        fetch_nordpool.py      # Day-ahead prices via hvakosterstrommen.no (no auth, ENTSO-E data)
         fetch_metro.py         # Weather data (Frost API historical + Yr forecast)
         fetch_fx.py            # EUR/NOK exchange rates (Norges Bank)
         fetch_commodity.py     # Natural gas / oil prices (CommodityPriceAPI)
@@ -64,6 +65,7 @@ All keys stored in `.env`, loaded with `python-dotenv`. See `.env.example` for t
 | Source | File | Auth | Env Variable |
 |--------|------|------|--------------|
 | ENTSO-E | `fetch_electricity.py` | API token (register + email) | `ENTSOE_API_KEY` |
+| hvakosterstrommen.no (day-ahead prices) | `fetch_nordpool.py` | None (public API) | — |
 | Frost API (historical weather) | `fetch_metro.py` | Client ID (register with email) | `FROST_CLIENT_ID` |
 | Yr / Locationforecast (forecast) | `fetch_metro.py` | No key — requires `User-Agent` header | — |
 | Norges Bank (FX rates) | `fetch_fx.py` | No key — fully open | — |
@@ -109,11 +111,17 @@ All keys stored in `.env`, loaded with `python-dotenv`. See `.env.example` for t
 ## Domain Rules
 
 - ENTSO-E API has rate limits — cache downloaded data locally, don't re-fetch existing date ranges
+- hvakosterstrommen.no API returns one day per zone at a time — cache aggressively per year, 0.3s delay between requests
+- hvakosterstrommen.no uses zone format "NO1" (no underscore); project uses "NO_1" — fetch_nordpool.py maps both ways
+- hvakosterstrommen.no prices are in EUR/kWh — multiply by 1000 for EUR/MWh (handled in fetch_nordpool.py)
+- Continuous price data available from October 2021; patchy before that
 - Fetch large date ranges in yearly chunks with sleep between calls
 - Prices transition to 15-minute resolution in 2025 (EU market change) — design for this
 - Weekend/holiday patterns differ significantly — always include calendar features
 - NO2 and NO5 prices correlate with hydro reservoir levels
 - EUR/NOK exchange rate affects price comparisons — ENTSO-E returns EUR/MWh
+- Price unit conversion: `price_nok_mwh = price_eur_mwh × eur_nok`, `price_nok_kwh = price_nok_mwh / 1000`
+- NOK lag features are computed FROM the NOK series (not EUR lags × FX), preserving the FX rate from the original timestamp
 - Norges Bank FX has no weekend/holiday data — forward-fill needed
 - Yr Locationforecast requires `User-Agent` header with app name + contact info
 - Store raw data as Parquet (not CSV) to preserve dtypes and timezones
@@ -159,7 +167,9 @@ A model that can't beat naive is not worth deploying.
 
 #### 1. Price Features (autoregressive — strongest predictors)
 
+**EUR/MWh (market standard — use for modeling):**
 ```
+price_eur_mwh        — Base price in EUR/MWh
 price_lag_1h         — Price 1 hour ago
 price_lag_24h        — Same hour yesterday (daily pattern)
 price_lag_168h       — Same hour last week (weekly pattern)
@@ -169,6 +179,20 @@ price_rolling_168h_mean  — Average price last week
 price_diff_24h       — Price change vs 24h ago
 price_diff_168h      — Price change vs 1 week ago
 ```
+
+**NOK/MWh and NOK/kWh (consumer reporting — NOT for modeling):**
+```
+price_nok_mwh        — EUR/MWh × EUR/NOK
+price_nok_kwh        — NOK/MWh / 1000
+price_nok_mwh_lag_1h, price_nok_mwh_lag_24h, price_nok_mwh_lag_168h
+price_nok_mwh_rolling_24h_mean, price_nok_mwh_rolling_24h_std, price_nok_mwh_rolling_168h_mean
+price_nok_mwh_diff_24h, price_nok_mwh_diff_168h
+price_nok_kwh_lag_1h, price_nok_kwh_lag_24h, price_nok_kwh_lag_168h
+price_nok_kwh_rolling_24h_mean, price_nok_kwh_rolling_24h_std, price_nok_kwh_rolling_168h_mean
+price_nok_kwh_diff_24h, price_nok_kwh_diff_168h
+```
+
+**Note:** EUR and NOK features are ~r>0.99 correlated. Use EUR/MWh features for model training. NOK features exist for consumer-facing dashboards and reporting only — including both in a model wastes feature slots with redundant information.
 
 #### 2. Calendar Features
 
@@ -572,6 +596,7 @@ Detailed API docs live in `docs/`. **Read the relevant doc before implementing a
 | When working on... | Read first |
 |---------------------|-----------|
 | `fetch_electricity.py` (prices, load, generation, flows) | `docs/entsoe_api_reference.md` |
+| `fetch_nordpool.py` (day-ahead prices, all zones) | hvakosterstrommen.no (free, no auth, ENTSO-E data) |
 | `fetch_metro.py` (weather observations + forecasts) | `docs/frost_api_docs.md` |
 | `fetch_commodity.py` (gas, oil, coal prices) | `docs/commodity_price_api.md` |
 | `fetch_reservoir.py` (NVE reservoir filling per zone) | `docs/nve_magasin_api_reference.md` |
@@ -585,9 +610,10 @@ and Norwegian-specific gotchas that are easy to get wrong without the reference.
 
 ## Current Phase
 
-**Phase 1: Data Foundation** — COMPLETE (except ENTSO-E API key)
+**Phase 1: Data Foundation** — COMPLETE
 
 All data fetchers are implemented, tested, and caching to `data/raw/`.
+Nord Pool provides price data (no key needed), unblocking Phase 2.
 
 ```
 ✅ Phase 0: Project setup
@@ -614,12 +640,21 @@ All data fetchers are implemented, tested, and caching to `data/raw/`.
    ✅ Handles yfinance MultiIndex columns (droplevel("Ticker"))
    ✅ Tested: 1,545 rows, 16 columns (OHLC × 4), 170KB Parquet
 
-⏳ Phase 1d: fetch_electricity.py — ENTSO-E prices, load, generation, flows
+✅ Phase 1d: fetch_nordpool.py — Day-ahead prices (primary price source)
+   ✅ Day-ahead prices for all 5 zones (NO1–NO5) via hvakosterstrommen.no
+   ✅ No API key required — free, public API (sources from ENTSO-E)
+   ✅ Daily API calls with 0.3s rate limiting, yearly Parquet caching
+   ✅ Prices in EUR/MWh + NOK/kWh + exchange rate
+   ✅ Continuous data from October 2021, patchy before that
+   ✅ Zone format mapping: project "NO_1" ↔ API "NO1"
+   ✅ Graceful error handling: skips missing days, exponential backoff
+
+⏳ Phase 1d-alt: fetch_electricity.py — ENTSO-E prices, load, generation, flows
    ✅ Code complete: fetch_prices, fetch_load, fetch_generation,
      fetch_reservoir_filling, fetch_crossborder_flows, fetch_all_entsoe
    ✅ Uses entsoe-py with yearly chunking + caching
    ✅ Graceful error when key missing (clear setup instructions)
-   ⬜ NOT TESTED — waiting for ENTSOE_API_KEY
+   ⬜ NOT TESTED — waiting for ENTSOE_API_KEY (optional, Nord Pool covers prices)
    → Set key in .env: ENTSOE_API_KEY=your-key-here
    → Then run: python -m src.data.fetch_electricity
 
@@ -639,7 +674,23 @@ All data fetchers are implemented, tested, and caching to `data/raw/`.
    ✅ Note: PhysicalFlow returns aggregate net exchange only (no per-cable breakdown)
    ✅ Note: Download CSV endpoint returns empty — JSON endpoints used instead
 
-🔲 Phase 2: Feature engineering (build_features.py)
+✅ Phase 2: Feature engineering (build_features.py)
+   ✅ Calendar, weather, commodity, FX, reservoir, Statnett features
+   ✅ Nord Pool price features integrated (price_eur_mwh + lags/rolling/diff)
+   ✅ EUR → NOK price conversion (price_nok_mwh, price_nok_kwh + full lag/rolling/diff)
+   ✅ All-zone orchestrator with Parquet caching (~45 features per zone)
+
+✅ Phase 2.5: Statistical inference analysis (notebook 08)
+   ✅ Price distribution analysis (Shapiro-Wilk, Anderson-Darling, KDE, QQ plots)
+   ✅ STL seasonal decomposition (weekly cycle, seasonal strength metric)
+   ✅ Kruskal-Wallis day-of-week significance tests
+   ✅ Reservoir deep dive (Spearman correlation, Granger causality lags 1–8)
+   ✅ Export/import pattern analysis (Mann-Whitney U, regime comparison)
+   ✅ Commodity passthrough (OLS regression, rolling R², structural break detection)
+   ✅ Zone decoupling (inter-zone correlation, ADF stationarity on spreads, N-S divide)
+   ✅ Autocorrelation & stationarity (ADF, KPSS, ACF/PACF up to 168h lags)
+   ✅ Key findings compiled with modeling recommendations for Phase 3
+
 🔲 Phase 3: Baseline models (naive + linear regression)
 🔲 Phase 4: XGBoost / LightGBM / CatBoost / ensemble
 🔲 Phase 5: Streamlit dashboard (incl. Tab 5: Cable Arbitrage)
@@ -698,11 +749,13 @@ I'll explain the concept, then we implement together.
 - [x] fetch_metro.py — weather data (Frost API), tested with Bergen 2020–2026
 - [x] fetch_fx.py — EUR/NOK exchange rates (Norges Bank), tested 2020–2026
 - [x] fetch_commodity.py — gas/oil/coal (yfinance + CommodityPriceAPI), tested 2020–2026
+- [x] fetch_nordpool.py — day-ahead prices via hvakosterstrommen.no (free, no auth, Oct 2021+)
 - [x] fetch_electricity.py — ENTSO-E prices/load/generation/flows (code complete, awaiting API key)
 - [x] fetch_reservoir.py — NVE reservoir filling per zone, tested with Bergen 2020–2026
 - [x] fetch_statnett.py — physical flows, prod/cons, overview, power situation, frequency
-- [ ] ENTSO-E API key (set in .env, then run `python -m src.data.fetch_electricity`)
-- [ ] Feature engineering (build_features.py)
+- [x] build_features.py — feature engineering with Nord Pool price integration
+- [x] Notebook 08 — Statistical inference analysis (distributions, STL, Granger, OLS, ADF/KPSS, ACF/PACF)
+- [ ] ENTSO-E API key (optional — Nord Pool covers prices; set in .env for load/generation data)
 - [ ] Baseline models (naive + linear regression)
 - [ ] Model training (XGBoost / LightGBM / CatBoost → ensemble)
 - [ ] Streamlit dashboard

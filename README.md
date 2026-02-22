@@ -4,14 +4,15 @@ ML-based forecasting of day-ahead electricity prices for Norwegian bidding zones
 
 ## Project Status
 
-**Phase 1 (Data Foundation) complete** — all data fetchers implemented and tested. Next: feature engineering and baseline models.
+**Phase 1 (Data Foundation) complete.** All data fetchers implemented and tested. Feature engineering in progress with Nord Pool price data.
 
 | Module | Source | Status | Auth |
 |--------|--------|--------|------|
+| `fetch_nordpool.py` | hvakosterstrommen.no (day-ahead prices) | Implemented | None |
 | `fetch_metro.py` | MET Norway Frost API | Tested | `FROST_CLIENT_ID` |
 | `fetch_fx.py` | Norges Bank | Tested | None |
 | `fetch_commodity.py` | yfinance + CommodityPriceAPI | Tested | `COMMODITY_API_KEY` |
-| `fetch_electricity.py` | ENTSO-E Transparency | Code complete | `ENTSOE_API_KEY` (pending) |
+| `fetch_electricity.py` | ENTSO-E Transparency | Code complete | `ENTSOE_API_KEY` (optional) |
 | `fetch_reservoir.py` | NVE Magasinstatistikk | Tested | None |
 | `fetch_statnett.py` | Statnett Driftsdata | Tested | None |
 
@@ -43,21 +44,22 @@ Store all keys in `.env` (never commit this file).
 | `ENTSOE_API_KEY` | ENTSO-E Transparency | Register at [transparency.entsoe.eu](https://transparency.entsoe.eu/), request token via email |
 | `COMMODITY_API_KEY` | CommodityPriceAPI | Register at [commoditypriceapi.com](https://commoditypriceapi.com/) |
 
-Three data sources require no authentication: Norges Bank (FX), NVE (reservoirs), and Statnett (grid data).
+Four data sources require no authentication: Nord Pool (prices), Norges Bank (FX), NVE (reservoirs), and Statnett (grid data).
 
 ## Project Structure
 
 ```
 src/
     data/                  # One fetcher per data source
+        fetch_nordpool.py      Day-ahead prices, production, consumption (Nord Pool)
         fetch_metro.py         Weather (temperature, wind, precipitation)
         fetch_fx.py            EUR/NOK exchange rates
         fetch_commodity.py     Gas, oil, coal prices
-        fetch_electricity.py   Day-ahead prices, load, generation, flows
+        fetch_electricity.py   Day-ahead prices, load, generation, flows (ENTSO-E)
         fetch_reservoir.py     Hydro reservoir filling per zone
         fetch_statnett.py      Cross-border flows, production/consumption
     features/
-        build_features.py      Feature engineering (TODO)
+        build_features.py      Feature engineering pipeline
     models/
         train.py               Training pipeline (TODO)
         evaluate.py            Metrics and evaluation (TODO)
@@ -126,9 +128,35 @@ df = fetch_commodities("2020-01-01", "2026-02-22")
 # 1,545 rows, 16 columns (OHLC × 4 symbols)
 ```
 
+### Day-Ahead Prices — hvakosterstrommen.no (`fetch_nordpool.py`)
+
+**Primary price data source.** No API key required. Serves ENTSO-E day-ahead prices for Norwegian zones via a free public API.
+
+```python
+from src.data.fetch_nordpool import fetch_prices
+
+# All 5 zones at once — returns hourly DataFrame with NO_1..NO_5 columns (EUR/MWh)
+prices = fetch_prices("2021-10-01", "2026-02-22")
+# ~38,000 rows × 5 columns, cached as yearly Parquet files per zone
+```
+
+Continuous data from October 2021. For earlier data, use ENTSO-E (`fetch_electricity.py`).
+
+### Price Units
+
+The feature matrix supports three price representations:
+
+| Unit | Column | Who uses it | Example |
+|------|--------|------------|---------|
+| EUR/MWh | `price_eur_mwh` | Market standard, trading | 89.9 |
+| NOK/MWh | `price_nok_mwh` | Norwegian industry | 1,045 |
+| NOK/kWh | `price_nok_kwh` | Consumer bills | 1.045 |
+
+Conversion: `price_nok_mwh = price_eur_mwh × eur_nok`, `price_nok_kwh = price_nok_mwh / 1000`. The EUR/NOK rate comes from Norges Bank via `fetch_fx.py`. Each unit has its own lag/rolling/diff features computed from the NOK series directly. Use EUR/MWh for modeling (NOK features are ~r>0.99 correlated).
+
 ### Electricity Market — ENTSO-E (`fetch_electricity.py`)
 
-Day-ahead prices, load, generation by type, and cross-border flows for Norwegian bidding zones. Requires API key.
+Load, generation by type, and cross-border flows for Norwegian bidding zones. Also has prices (same data source as hvakosterstrommen.no). Requires API key.
 
 ```python
 from src.data.fetch_electricity import fetch_prices, fetch_all_entsoe
@@ -190,6 +218,7 @@ All fetchers cache to `data/raw/` as Parquet files. Delete cache files to re-fet
 
 | File | Size | Rows | Source |
 |------|------|------|--------|
+| `prices_{zone}_{year}.parquet` | ~200 KB | ~8,760 | hvakosterstrommen.no |
 | `weather_NO_5_*.parquet` | 600 KB | 53,712 | Frost API |
 | `fx_eur_nok_*.parquet` | 24 KB | 1,548 | Norges Bank |
 | `commodity_yfinance_*.parquet` | 170 KB | 1,545 | yfinance |
@@ -200,8 +229,8 @@ All fetchers cache to `data/raw/` as Parquet files. Delete cache files to re-fet
 
 ## Roadmap
 
-- [x] **Phase 1** — Data fetching (all sources implemented)
-- [ ] **Phase 2** — Feature engineering: lags, rolling stats, calendar features, cross-source joins
+- [x] **Phase 1** — Data fetching (all sources implemented, Nord Pool unblocks price data)
+- [x] **Phase 2** — Feature engineering: EUR + NOK price features, calendar, weather, commodities, FX, reservoir, Statnett (~45 features/zone)
 - [ ] **Phase 3** — Baseline models: naive (same-hour-last-week), linear regression, Ridge/Lasso
 - [ ] **Phase 4** — Tree models: XGBoost, LightGBM, CatBoost, ensemble
 - [ ] **Phase 5** — Streamlit dashboard with live forecasts and cable arbitrage tab
@@ -233,7 +262,7 @@ See `CLAUDE.md` for detailed ML strategy, feature engineering plan, and evaluati
 | File | Contents |
 |------|----------|
 | `CLAUDE.md` | Project context for Claude Code: architecture, conventions, ML strategy, feature plan |
-| `GUIDE.md` | Getting-started guide: setup, workflow tips, learning path |
+| `GUIDE.md` | Getting-started guide: setup, workflow tips, learning path (includes Nord Pool section) |
 | `docs/entsoe_api_reference.md` | ENTSO-E Transparency Platform API reference |
 | `docs/frost_api_docs.md` | MET Norway Frost API reference |
 | `docs/commodity_price_api.md` | CommodityPriceAPI reference |

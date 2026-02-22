@@ -245,15 +245,54 @@ api_key = os.getenv("ENTSOE_API_KEY")
 
 | Source | Auth method | Registration |
 |--------|-----------|--------------|
+| **hvakosterstrommen.no** (day-ahead prices) | None (public API) | None |
 | **ENTSO-E** | API token in query params | Register at transparency.entsoe.eu → email transparency@entsoe.eu |
 | **Frost API** (historical weather) | HTTP Basic Auth (client ID as username, empty password) | Register at frost.met.no with email |
 | **Yr / Locationforecast** (forecast weather) | No key — custom `User-Agent` header required | None |
 | **Norges Bank** (FX rates) | Fully open — no auth at all | None |
 | **CommodityPriceAPI** | API key in query params | Register at commoditypriceapi.com |
 
+### Day-Ahead Prices — hvakosterstrommen.no — `fetch_nordpool.py`
+
+**Primary source for day-ahead prices.** No API key required. Free public API that serves
+ENTSO-E price data for Norwegian bidding zones.
+
+| Detail | Info |
+|---|---|
+| **What** | Day-ahead prices per zone (NO1–NO5) in EUR and NOK |
+| **API** | `https://www.hvakosterstrommen.no/api/v1/prices/{YEAR}/{MM}-{DD}_{ZONE}.json` |
+| **Auth** | None — fully open, no registration |
+| **Granularity** | Hourly (one API call per zone per day) |
+| **Format** | EUR/kWh and NOK/kWh (module converts to EUR/MWh) |
+| **Historical data** | Continuous from October 2021; patchy before that |
+
+**Data source:** hvakosterstrommen.no serves ENTSO-E day-ahead prices converted via
+Norges Bank exchange rates. Nord Pool's own Data Portal API now requires a paid
+subscription (1,200+ EUR/year), so this free alternative is used instead.
+
+```python
+from src.data.fetch_nordpool import fetch_prices, fetch_zone_prices
+
+# All 5 zones at once (returns DataFrame with NO_1..NO_5 columns, EUR/MWh)
+prices = fetch_prices("2021-10-01", "2026-02-22")
+
+# Full detail for a single zone (EUR/MWh, NOK/kWh, exchange rate)
+detail = fetch_zone_prices("NO_5", "2024-01-01", "2024-12-31")
+```
+
+**Zone format:** The API uses `"NO1"` (no underscore). The module maps to/from the project
+format `"NO_1"` automatically — you always use `"NO_1"` in your code.
+
+**Caching:** Completed years are cached as `data/raw/prices_{zone}_{year}.parquet`.
+Current year re-fetches on each run. First full backfill for all 5 zones takes ~30 min
+(0.3s per daily API call × ~1,600 days × 5 zones).
+
 ### ENTSO-E Transparency Platform — `fetch_electricity.py`
 
-Your **primary data source** for electricity prices. ENTSO-E is the upstream source for Nord Pool day-ahead prices.
+Provides load, generation by type, and cross-border flows — data not available from
+hvakosterstrommen.no. Also has prices (same underlying data). Requires an API key.
+
+ENTSO-E is the upstream source for Nord Pool day-ahead prices.
 
 | Detail | Info |
 |---|---|
@@ -406,6 +445,39 @@ data = resp.json()
 - `excel-both` — Excel format
 
 **Tip:** Use the [query builder tool](https://app.norges-bank.no/query/#/en/) to explore available data series and generate API URLs.
+
+### Price Units & Conversion
+
+Norwegian electricity prices exist in three units depending on audience:
+
+| Unit | Column | Audience | Typical range |
+|------|--------|----------|---------------|
+| **EUR/MWh** | `price_eur_mwh` | Market/trading | 20–300 |
+| **NOK/MWh** | `price_nok_mwh` | Industry/grid operators | 200–3,500 |
+| **NOK/kWh** | `price_nok_kwh` | Consumer bills | 0.20–3.50 |
+
+**Conversion formulas:**
+```python
+price_nok_mwh = price_eur_mwh * eur_nok    # EUR/NOK from Norges Bank
+price_nok_kwh = price_nok_mwh / 1000        # MWh → kWh
+```
+
+**Worked example** (January 2024 average for NO_5 Bergen):
+```
+price_eur_mwh = 65.2 EUR/MWh
+eur_nok       = 11.35
+price_nok_mwh = 65.2 × 11.35 = 740 NOK/MWh
+price_nok_kwh = 740 / 1000   = 0.740 NOK/kWh
+
+→ A 2 kW heater costs 0.740 × 2 = 1.48 NOK/hour to run
+```
+
+**When to use each unit:**
+- **EUR/MWh for modeling** — market standard, used by ENTSO-E and Nord Pool
+- **NOK/kWh for consumer reporting** — what appears on electricity bills and Streamlit dashboards
+- **NOK/MWh for industry** — used by grid operators and large consumers
+
+**Modeling note:** EUR and NOK features are ~r>0.99 correlated (the EUR/NOK rate changes slowly compared to daily price swings). Use EUR/MWh features for model training. NOK features are included for dashboards and consumer-facing reporting only.
 
 ### Commodity Prices — `fetch_commodity.py`
 
@@ -643,6 +715,41 @@ Run with: `streamlit run app/streamlit_app.py`
 - [ ] Add calendar features (hour, day of week, month, is_weekend, is_holiday)
 - [ ] Handle missing values (interpolation for weather, forward-fill for FX/commodities)
 - [ ] Write `src/features/build_features.py`
+
+### Phase 3.5: Statistical Inference (week 4)
+
+Before jumping into modeling, apply formal statistical methods to understand the data.
+This validates assumptions, identifies key relationships, and informs feature selection.
+
+See `notebooks/08_statistical_inference_analysis.ipynb` for full implementation.
+
+- [x] Price distribution analysis — test normality (Shapiro-Wilk, Anderson-Darling), measure skewness/kurtosis, QQ plots
+- [x] Seasonal decomposition — STL (trend + seasonal + residual), Kruskal-Wallis day-of-week test
+- [x] Reservoir-price relationship — Spearman correlation, Granger causality (lags 1–8 weeks)
+- [x] Export/import patterns — Mann-Whitney U test (export vs import day prices), export intensity
+- [x] Commodity passthrough — OLS regression (price ~ TTF + Brent + coal + FX), cross-correlation lags, structural break analysis (pre/post energy crisis)
+- [x] Zone decoupling — inter-zone correlation matrix, ADF stationarity test on price spreads, North-South divide
+- [x] Autocorrelation — ADF & KPSS stationarity tests, ACF/PACF plots (168h lags), differencing analysis
+
+**Statistical methods quick reference:**
+
+| Method | Library call | What it tests | Key output |
+|---|---|---|---|
+| Shapiro-Wilk | `scipy.stats.shapiro()` | Is data normally distributed? | W stat, p-value |
+| Anderson-Darling | `scipy.stats.anderson()` | Normality (sensitive to tails) | Test stat vs critical values |
+| Skewness/Kurtosis | `scipy.stats.skew/kurtosis()` | Distribution shape | Scalar (0 = normal) |
+| KDE | `scipy.stats.gaussian_kde()` | Non-parametric density estimate | Smooth density curve |
+| STL | `statsmodels.tsa.seasonal.STL()` | Decompose trend + seasonal + residual | Three component series |
+| Kruskal-Wallis | `scipy.stats.kruskal()` | Do group medians differ? (non-parametric ANOVA) | H stat, p-value |
+| Spearman ρ | `scipy.stats.spearmanr()` | Monotonic (non-linear) correlation | ρ (-1 to +1), p-value |
+| Pearson r | `scipy.stats.pearsonr()` | Linear correlation | r (-1 to +1), p-value |
+| Granger causality | `statsmodels.tsa.stattools.grangercausalitytests()` | Does X help predict Y? | F-stat, p-value per lag |
+| Mann-Whitney U | `scipy.stats.mannwhitneyu()` | Are two groups from same distribution? | U stat, p-value |
+| OLS regression | `statsmodels.api.OLS()` | Linear model: Y = Xβ + ε | R², coefficients, t-stats |
+| ADF test | `statsmodels.tsa.stattools.adfuller()` | Is series stationary? (H₀: unit root) | ADF stat, p-value |
+| KPSS test | `statsmodels.tsa.stattools.kpss()` | Is series stationary? (H₀: stationary) | KPSS stat, p-value |
+| ACF | `statsmodels.tsa.stattools.acf()` | Autocorrelation at each lag | Correlation values |
+| PACF | `statsmodels.tsa.stattools.pacf()` | Direct (partial) autocorrelation | Correlation values |
 
 ### Phase 4: Modeling (week 4–6)
 - [ ] Implement train/test split by time (e.g., train 2017–2023, test 2024)
