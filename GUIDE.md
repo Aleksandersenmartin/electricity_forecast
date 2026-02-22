@@ -8,19 +8,18 @@ A hands-on reference for building a Nordic electricity price forecasting project
 
 1. [Project Structure](#1-project-structure)
 2. [CLAUDE.md Best Practices](#2-claudemd-best-practices)
-3. [MCP Server Setup](#3-mcp-server-setup)
-4. [Claude Code Workflow Tips](#4-claude-code-workflow-tips)
-5. [Settings & Permissions](#5-settings--permissions)
-6. [Data Sources](#6-data-sources)
+3. [Claude Code Workflow Tips](#3-claude-code-workflow-tips)
+4. [Settings & Permissions](#4-settings--permissions)
+5. [Data Sources](#5-data-sources)
+6. [Data Caching Strategy](#6-data-caching-strategy)
 7. [ML Approach](#7-ml-approach)
 8. [Streamlit App & Deployment](#8-streamlit-app--deployment)
 9. [Suggested Learning Path](#9-suggested-learning-path)
+10. [MCP Server Setup (Optional)](#10-mcp-server-setup-optional)
 
 ---
 
 ## 1. Project Structure
-
-A clean structure separates concerns and makes it easy for Claude Code to understand your codebase.
 
 ```
 electricity_forecast/
@@ -29,45 +28,49 @@ electricity_forecast/
 ├── README.md                # Project readme (create when ready)
 ├── requirements.txt         # pip dependencies
 ├── .env                     # API keys (never commit — add to .gitignore)
+├── .env.example             # Template showing required env vars
 ├── .gitignore
+├── .claudeignore            # Keeps large files out of Claude Code context
 │
 ├── src/
 │   ├── __init__.py
 │   ├── data/
 │   │   ├── __init__.py
-│   │   ├── fetch_nordpool.py    # Nord Pool price data
-│   │   ├── fetch_entsoe.py      # ENTSO-E transparency platform
-│   │   ├── fetch_weather.py     # Weather data (wind, sun, temp, rain)
-│   │   └── fetch_gas.py         # Natural gas / oil prices
+│   │   ├── fetch_electricity.py  # ENTSO-E day-ahead prices (all zones)
+│   │   ├── fetch_metro.py        # Weather (Frost API historical + Yr forecast)
+│   │   ├── fetch_fx.py           # EUR/NOK exchange rates (Norges Bank)
+│   │   └── fetch_commodity.py    # Natural gas / oil prices (CommodityPriceAPI)
 │   │
 │   ├── features/
 │   │   ├── __init__.py
-│   │   └── build_features.py    # Feature engineering (lags, rolling stats, etc.)
+│   │   └── build_features.py     # Feature engineering (lags, rolling stats, etc.)
 │   │
 │   ├── models/
 │   │   ├── __init__.py
-│   │   ├── train.py             # Training pipeline
-│   │   ├── evaluate.py          # Metrics and evaluation
-│   │   └── predict.py           # Inference / forecasting
+│   │   ├── train.py              # Training pipeline
+│   │   ├── evaluate.py           # Metrics and evaluation
+│   │   └── predict.py            # Inference / forecasting
 │   │
 │   └── utils/
 │       ├── __init__.py
-│       └── config.py            # Shared configuration, paths, constants
-│
-├── notebooks/
-│   └── exploration.ipynb        # EDA and experimentation
+│       └── config.py             # Shared configuration, paths, constants
 │
 ├── data/
-│   ├── raw/                     # Untouched downloaded data
-│   └── processed/               # Cleaned, merged datasets
+│   ├── raw/                      # Untouched downloaded data
+│   └── processed/                # Cleaned, merged datasets
 │
-├── models/                      # Saved model artifacts (.pkl, .joblib)
+├── artifacts/                    # Saved model artifacts (.pkl, .joblib)
 │
 ├── app/
-│   └── streamlit_app.py         # Streamlit dashboard
+│   └── streamlit_app.py          # Streamlit dashboard
+│
+├── notebooks/
+│   └── exploration.ipynb         # EDA and experimentation
+│
+├── docs/                         # Additional documentation and notes
 │
 └── tests/
-    └── test_features.py         # Unit tests
+    └── test_features.py          # Unit tests
 ```
 
 **Key principles:**
@@ -75,6 +78,7 @@ electricity_forecast/
 - `src/features/` — transform raw data into model-ready features
 - `src/models/` — training, evaluation, prediction as separate concerns
 - `data/raw/` vs `data/processed/` — never overwrite raw data
+- `artifacts/` — saved models, separate from source code in `src/models/`
 - `notebooks/` — for exploration only; move reusable code into `src/`
 
 ---
@@ -91,8 +95,9 @@ CLAUDE.md is loaded into every Claude Code conversation. It's your way of giving
 | **Architecture** | Folder layout, key modules, how things connect |
 | **Commands** | How to run, test, lint — so Claude can verify its work |
 | **Conventions** | Naming, formatting, patterns you want followed |
+| **Domain rules** | Things Claude can't know without being told (rate limits, timezone rules, etc.) |
 | **Current status** | What's built, what's in progress — update as you go |
-| **Dependencies** | Key libraries and their roles |
+| **Working style** | How you want to interact (explain first, don't auto-commit, etc.) |
 
 ### Tips for effectiveness
 
@@ -101,139 +106,32 @@ CLAUDE.md is loaded into every Claude Code conversation. It's your way of giving
 - **Be specific.** "Use pandas for data, scikit-learn for models" is better than "use standard libraries."
 - **Include commands.** If Claude knows how to run tests (`pytest tests/`), it can verify its own work.
 - **State what NOT to do.** "Don't auto-commit" or "Don't add type hints unless I ask" prevents unwanted changes.
-
-### Example structure
-
-```markdown
-# CLAUDE.md
-
-## Project Overview
-Nordic electricity price forecasting using ML. Predicts day-ahead
-prices for NO1-NO5 bidding zones using weather, fuel prices, and
-historical price data.
-
-## Architecture
-- `src/data/` — data fetching (one file per source)
-- `src/features/` — feature engineering
-- `src/models/` — training and prediction
-- `app/` — Streamlit dashboard
-
-## Commands
-- Install: `pip install -r requirements.txt`
-- Run tests: `pytest tests/`
-- Run app: `streamlit run app/streamlit_app.py`
-- Lint: `ruff check src/`
-
-## Conventions
-- Python 3.12, use f-strings
-- pandas for data manipulation
-- scikit-learn and XGBoost for models
-- Functions should have docstrings explaining parameters
-- Keep functions small and single-purpose
-
-## Current Status
-- [x] Project structure created
-- [ ] Nord Pool data fetching
-- [ ] Weather data integration
-- [ ] Feature engineering
-- [ ] Model training
-- [ ] Streamlit app
-
-## Key Dependencies
-- pandas, numpy — data handling
-- requests — API calls
-- scikit-learn, xgboost — modeling
-- streamlit — dashboard
-- python-dotenv — environment variables
-```
+- **Keep CLAUDE.md and GUIDE.md consistent.** If you change a data source or convention in one, update the other.
 
 ---
 
-## 3. MCP Server Setup
-
-MCP (Model Context Protocol) servers give Claude Code access to external tools and data sources. Here are the most useful ones for this project.
-
-### Recommended MCP servers
-
-#### 1. Filesystem MCP Server
-Already built-in to Claude Code — no setup needed. Claude can read/write files directly.
-
-#### 2. Fetch MCP Server (web requests)
-Lets Claude fetch URLs and API responses directly.
-
-```json
-// In ~/.claude/settings.json under "mcpServers":
-{
-  "fetch": {
-    "command": "uvx",
-    "args": ["mcp-server-fetch"]
-  }
-}
-```
-
-Install: `pip install mcp-server-fetch` (or use `uvx` which runs it without install).
-
-**Use case:** Claude can fetch Nord Pool or ENTSO-E API responses to help you debug data pipelines.
-
-#### 3. SQLite MCP Server (if you store data in SQLite)
-```json
-{
-  "sqlite": {
-    "command": "uvx",
-    "args": ["mcp-server-sqlite", "--db-path", "data/electricity.db"]
-  }
-}
-```
-
-**Use case:** If you store processed data in SQLite, Claude can query it directly.
-
-#### 4. GitHub MCP Server
-```json
-{
-  "github": {
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-github"],
-    "env": {
-      "GITHUB_PERSONAL_ACCESS_TOKEN": "<your-token>"
-    }
-  }
-}
-```
-
-**Use case:** Claude can create issues, PRs, and manage your repo without leaving the conversation.
-
-### Where to configure
-
-MCP servers go in `~/.claude/settings.json` (global) or `.claude/settings.json` (project-level). Project-level is better for project-specific servers like SQLite.
-
-### Don't overdo it
-
-Start with just the **Fetch** server. Add others only when you have a concrete need. Each MCP server adds startup time and context.
-
----
-
-## 4. Claude Code Workflow Tips
+## 3. Claude Code Workflow Tips
 
 ### Use Plan Mode for learning
 
-Plan mode (`/plan`) is your best friend for learning. Instead of Claude writing code immediately, it:
+Plan mode (press `Shift+Tab` twice) is your best friend for learning. Instead of Claude writing code immediately, it:
 1. Explores your codebase
 2. Proposes an approach
 3. Waits for your approval
 
 **How to use it for learning:**
 ```
-You: "I want to fetch Nord Pool day-ahead prices. Don't write the code —
-      explain the API, show me the data format, and outline the steps.
-      I'll implement it myself."
+You: "I want to fetch ENTSO-E day-ahead prices for all 5 Norwegian zones.
+      Don't write the code — explain the API, show me the data format,
+      and outline the steps. I'll implement it myself."
 ```
 
 ### Effective prompting patterns
 
 | Pattern | Example |
 |---|---|
-| **Explain, don't implement** | "Explain how I would connect to the ENTSO-E API" |
-| **Review my code** | "Review this function — what could be improved?" |
+| **Explain, don't implement** | "Explain how the entsoe-py wrapper handles bidding zones" |
+| **Review my code** | "Review fetch_electricity.py — what could be improved?" |
 | **Teach the concept** | "Explain what feature engineering means for time series" |
 | **Scaffold then fill** | "Create the file structure, I'll write the functions" |
 | **Debug together** | "This returns empty data — help me debug step by step" |
@@ -258,15 +156,11 @@ You: "I want to fetch Nord Pool day-ahead prices. Don't write the code —
 5. Ask Claude to help you **write tests**
 6. Iterate
 
-This way you learn the material while Claude handles the parts that aren't educational (boilerplate, test setup, debugging obscure API errors).
-
 ---
 
-## 5. Settings & Permissions
+## 4. Settings & Permissions
 
 ### Project settings (`.claude/settings.json`)
-
-Create this file to configure Claude Code for your project:
 
 ```json
 {
@@ -286,11 +180,7 @@ Create this file to configure Claude Code for your project:
 }
 ```
 
-**What this does:**
-- `allow` — Claude can run these without asking every time
-- `deny` — Claude can never run these (safety net)
-
-### Recommended `.gitignore` additions
+### Recommended `.gitignore`
 
 ```
 # Environment
@@ -301,8 +191,8 @@ __pycache__/
 # Data (too large for git)
 data/raw/
 data/processed/
-models/*.pkl
-models/*.joblib
+artifacts/*.pkl
+artifacts/*.joblib
 
 # IDE
 .vscode/
@@ -312,13 +202,29 @@ models/*.joblib
 .claude/
 ```
 
-### Environment variables (`.env`)
-
-Store API keys here, never in code:
+### Recommended `.claudeignore`
 
 ```
-ENTSOE_API_KEY=your-key-here
-OPENWEATHER_API_KEY=your-key-here
+data/raw/
+data/processed/
+artifacts/
+notebooks/.ipynb_checkpoints/
+.env
+*.sqlite
+*.db
+__pycache__/
+*.pyc
+.pytest_cache/
+```
+
+### Environment variables (`.env`)
+
+Only three keys needed — Norges Bank and Yr require no API keys:
+
+```
+ENTSOE_API_KEY=your-token-here
+FROST_CLIENT_ID=your-client-id-here
+COMMODITY_API_KEY=your-key-here
 ```
 
 Load them with `python-dotenv`:
@@ -332,79 +238,268 @@ api_key = os.getenv("ENTSOE_API_KEY")
 
 ---
 
-## 6. Data Sources
+## 5. Data Sources
 
-### Nord Pool (electricity prices)
+### Authentication overview
+
+| Source | Auth method | Registration |
+|--------|-----------|--------------|
+| **ENTSO-E** | API token in query params | Register at transparency.entsoe.eu → email transparency@entsoe.eu |
+| **Frost API** (historical weather) | HTTP Basic Auth (client ID as username, empty password) | Register at frost.met.no with email |
+| **Yr / Locationforecast** (forecast weather) | No key — custom `User-Agent` header required | None |
+| **Norges Bank** (FX rates) | Fully open — no auth at all | None |
+| **CommodityPriceAPI** | API key in query params | Register at commoditypriceapi.com |
+
+### ENTSO-E Transparency Platform — `fetch_electricity.py`
+
+Your **primary data source** for electricity prices. ENTSO-E is the upstream source for Nord Pool day-ahead prices.
 
 | Detail | Info |
 |---|---|
-| **What** | Day-ahead electricity prices for Nordic bidding zones (NO1–NO5, SE1–SE4, DK1–DK2, FI) |
-| **API** | No official free API. Options: ENTSO-E Transparency Platform, or `nordpool` Python package |
-| **Python package** | `pip install nordpool` — community package, scrapes Nord Pool website |
-| **Granularity** | Hourly prices, published day-ahead around 12:42 CET |
-| **Format** | EUR/MWh (convert to NOK/kWh if needed) |
-
-### ENTSO-E Transparency Platform (recommended for prices + generation)
-
-| Detail | Info |
-|---|---|
-| **What** | Official EU transparency data: prices, generation, load, cross-border flows |
+| **What** | Day-ahead prices, actual generation per type, load, cross-border flows |
 | **API** | REST API — free, requires registration |
-| **Sign up** | https://transparency.entsoe.eu/ — create account, request API key |
-| **Python package** | `pip install entsoe-py` — well-maintained wrapper |
-| **Key endpoints** | Day-ahead prices, actual generation per type, load forecast |
-| **Bidding zones** | NO-1 through NO-5 (use ENTSO-E area codes) |
+| **Sign up** | https://transparency.entsoe.eu/ → register → email transparency@entsoe.eu |
+| **Python package** | `pip install entsoe-py` |
+| **Granularity** | Hourly (transitioning to 15-minute in 2025) |
+| **Format** | EUR/MWh |
+
+**Norwegian bidding zones:**
+
+| Zone | Area | EIC Code | `entsoe-py` key |
+|------|------|----------|-----------------|
+| NO1 | Øst-Norge (Oslo) | `10YNO-1--------2` | `NO_1` |
+| NO2 | Sør-Norge (Kristiansand) | `10YNO-2--------T` | `NO_2` |
+| NO3 | Midt-Norge (Trondheim) | `10YNO-3--------J` | `NO_3` |
+| NO4 | Nord-Norge (Tromsø) | `10YNO-4--------9` | `NO_4` |
+| NO5 | Vest-Norge (Bergen) | `10Y1001A1001A48H` | `NO_5` |
 
 ```python
-# Example using entsoe-py
 from entsoe import EntsoePandasClient
-client = EntsoePandasClient(api_key="YOUR_KEY")
-
-# Fetch day-ahead prices for NO1
 import pandas as pd
+
+client = EntsoePandasClient(api_key=os.getenv("ENTSOE_API_KEY"))
+
 start = pd.Timestamp("2024-01-01", tz="Europe/Oslo")
 end = pd.Timestamp("2024-01-31", tz="Europe/Oslo")
-prices = client.query_day_ahead_prices("NO_1", start=start, end=end)
+
+zones = ["NO_1", "NO_2", "NO_3", "NO_4", "NO_5"]
+all_prices = {}
+for zone in zones:
+    all_prices[zone] = client.query_day_ahead_prices(zone, start=start, end=end)
 ```
 
-### Weather data
+### MET Norway Weather Data — `fetch_metro.py`
 
-| Source | What you get | Free tier |
-|---|---|---|
-| **Open-Meteo** (open-meteo.com) | Temperature, wind speed, solar radiation, precipitation — historical + forecast | Free, no API key needed |
-| **MET Norway (Frost API)** | Norwegian weather stations — very detailed | Free, requires registration |
-| **OpenWeather** | Global weather data | Free tier: 1000 calls/day |
+MET Norway provides several free data services. You need two of them:
 
-**Open-Meteo is the best starting point** — no API key, good historical data, and forecast data.
+| Service | URL | What | Use case |
+|---------|-----|------|----------|
+| **Frost API** | frost.met.no | Historical observations from weather stations | Training data (8 years) |
+| **Yr / Locationforecast** | api.met.no/weatherapi/locationforecast/2.0 | Weather forecast (up to 9 days) | Live forecasting in dashboard |
+| **seKlima** | seklima.met.no | Web GUI for observations & statistics | Manual exploration, not API |
+
+All MET Norway data is free under Creative Commons license. Credit: "Data from MET Norway."
+
+#### Frost API (historical observations)
+
+Requires registration — go to https://frost.met.no/, register with email, receive client ID.
 
 ```python
-# Example: Open-Meteo historical weather
 import requests
 
+client_id = os.getenv("FROST_CLIENT_ID")
+endpoint = "https://frost.met.no/observations/v0.jsonld"
+
 params = {
-    "latitude": 59.91,   # Oslo
-    "longitude": 10.75,
-    "start_date": "2024-01-01",
-    "end_date": "2024-01-31",
-    "hourly": "temperature_2m,wind_speed_10m,shortwave_radiation,precipitation"
+    "sources": "SN18700",           # Oslo - Blindern
+    "elements": "air_temperature,wind_speed,sum(precipitation_amount PT1H)",
+    "referencetime": "2024-01-01/2024-01-31",
+    "timeresolutions": "PT1H",
 }
-resp = requests.get("https://archive-api.open-meteo.com/v1/archive", params=params)
+
+# HTTP Basic Auth: client_id as username, empty password
+resp = requests.get(endpoint, params=params, auth=(client_id, ""))
 data = resp.json()
 ```
 
-### Fuel prices
+**Key weather stations per bidding zone:**
 
-| Source | What | Access |
-|---|---|---|
-| **ECB/Fred** | EUR/USD exchange rates | Free APIs |
-| **EIA** (U.S. Energy Information Administration) | Natural gas (Henry Hub), oil (Brent/WTI) | Free API key |
-| **Yahoo Finance** | Gas futures, oil futures | `yfinance` Python package (free) |
+| Zone | Station | Frost ID |
+|------|---------|----------|
+| NO1 (Oslo) | Oslo - Blindern | SN18700 |
+| NO2 (Kristiansand) | Kristiansand - Kjevik | SN39040 |
+| NO3 (Trondheim) | Trondheim - Voll | SN68860 |
+| NO4 (Tromsø) | Tromsø | SN90450 |
+| NO5 (Bergen) | Bergen - Florida | SN50540 |
+
+**Useful Frost elements for price forecasting:**
+
+| Element | Description | Relevance |
+|---------|-------------|-----------|
+| `air_temperature` | Temperature (°C) | Heating demand drives prices |
+| `wind_speed` | Wind speed (m/s) | Wind generation suppresses prices |
+| `sum(precipitation_amount PT1H)` | Hourly rainfall (mm) | Hydro inflow indicator |
+| `surface_snow_thickness` | Snow depth (cm) | Future hydro inflow |
+| `cloud_area_fraction` | Cloud cover (%) | Solar generation proxy |
+
+#### Yr / Locationforecast (weather forecasts)
+
+No API key needed — but you **must** set a custom `User-Agent` header with your app name and contact info. Without this you get `403 Forbidden`.
 
 ```python
-# Example: Natural gas prices via yfinance
+import requests
+
+headers = {
+    "User-Agent": "electricity-forecast github.com/aleksandersenmartin"
+}
+
+# Compact format — enough for most needs
+url = "https://api.met.no/weatherapi/locationforecast/2.0/compact"
+params = {"lat": 59.91, "lon": 10.75}  # Oslo
+
+resp = requests.get(url, params=params, headers=headers)
+forecast = resp.json()
+```
+
+**Important Yr/Locationforecast rules:**
+- Always use HTTPS
+- Don't exceed 20 requests/second
+- Respect `Expires` header — don't re-fetch before it expires
+- Don't use more than 4 decimal places in coordinates (caching)
+- Forecast data only (up to ~9 days ahead) — not historical
+
+### Norges Bank Exchange Rates — `fetch_fx.py`
+
+**Fully open — no API key, no registration, no auth.** Just call the URL.
+
+ENTSO-E returns prices in EUR/MWh. You need EUR/NOK to convert.
+
+| Detail | Info |
+|---|---|
+| **What** | Daily exchange rates (EUR/NOK, USD/NOK, etc.) |
+| **API** | Norges Bank Data Warehouse — SDMX REST API |
+| **Docs** | https://www.norges-bank.no/en/topics/statistics/open-data/guide-data-warehouse/ |
+| **Query builder** | https://app.norges-bank.no/query/#/en/ |
+| **Auth** | None |
+| **Granularity** | Daily (no weekends/holidays — forward-fill needed) |
+
+```python
+import requests
+
+# EUR/NOK exchange rate — no auth needed
+url = "https://data.norges-bank.no/api/data/EXR/B.EUR.NOK.SP"
+params = {
+    "startPeriod": "2017-01-01",
+    "endPeriod": "2025-01-31",
+    "format": "sdmx-json",
+}
+
+resp = requests.get(url, params=params)
+data = resp.json()
+```
+
+**Available formats:**
+- `sdmx-json` — JSON (recommended for Python)
+- `csv` — one observation per row
+- `csv-ts` — one time series per row
+- `excel-both` — Excel format
+
+**Tip:** Use the [query builder tool](https://app.norges-bank.no/query/#/en/) to explore available data series and generate API URLs.
+
+### Commodity Prices — `fetch_commodity.py`
+
+| Detail | Info |
+|---|---|
+| **What** | Natural gas, oil (Brent/WTI), coal |
+| **API** | CommodityPriceAPI REST |
+| **Docs** | https://commoditypriceapi.com/#documentation |
+| **Auth** | API key in query params |
+| **Granularity** | Daily |
+
+```python
+import requests
+
+api_key = os.getenv("COMMODITY_API_KEY")
+url = f"https://commoditypriceapi.com/api/latest?access_key={api_key}&base=USD&symbols=NG,BRENT"
+resp = requests.get(url)
+data = resp.json()
+```
+
+**Alternative (free, no API key):**
+```python
 import yfinance as yf
-gas = yf.download("NG=F", start="2024-01-01", end="2024-12-31")  # Natural gas futures
-oil = yf.download("BZ=F", start="2024-01-01", end="2024-12-31")  # Brent crude futures
+gas = yf.download("NG=F", start="2017-01-01", end="2025-01-31")    # Natural gas futures
+oil = yf.download("BZ=F", start="2017-01-01", end="2025-01-31")    # Brent crude futures
+```
+
+---
+
+## 6. Data Caching Strategy
+
+Fetching 8 years of hourly data for 5 zones means ~350,000 rows of price data alone. Build smart caching from day one.
+
+### Principles
+
+1. **Never re-fetch data you already have.** Check `data/raw/` before calling the API.
+2. **Fetch incrementally.** Only request the missing date range.
+3. **Store raw data immutably.** Save to `data/raw/` as-is. Processing happens separately.
+4. **Use Parquet** (not CSV) — faster, smaller, preserves dtypes and timezones. Install with `pip install pyarrow`.
+
+### Chunked fetching for large date ranges
+
+ENTSO-E can time out on very large queries. Fetch in yearly chunks:
+
+```python
+import pandas as pd
+import time
+import os
+from entsoe import EntsoePandasClient
+
+client = EntsoePandasClient(api_key=os.getenv("ENTSOE_API_KEY"))
+zones = ["NO_1", "NO_2", "NO_3", "NO_4", "NO_5"]
+
+for year in range(2017, 2025):
+    start = pd.Timestamp(f"{year}-01-01", tz="Europe/Oslo")
+    end = pd.Timestamp(f"{year}-12-31 23:00", tz="Europe/Oslo")
+
+    for zone in zones:
+        filepath = f"data/raw/electricity_{zone}_{year}.parquet"
+
+        if os.path.exists(filepath):
+            print(f"Skipping {zone} {year} — already cached")
+            continue
+
+        prices = client.query_day_ahead_prices(zone, start=start, end=end)
+        prices.to_frame("price_eur_mwh").to_parquet(filepath)
+        print(f"Saved {zone} {year}")
+        time.sleep(2)  # Be polite to the API
+```
+
+### Incremental update pattern
+
+```python
+def fetch_electricity(zone: str, start: str, end: str) -> pd.DataFrame:
+    """Fetch ENTSO-E prices with local cache."""
+
+    cache_path = f"data/raw/electricity_{zone}.parquet"
+
+    if os.path.exists(cache_path):
+        cached = pd.read_parquet(cache_path)
+        last_date = cached.index.max()
+
+        if last_date >= pd.Timestamp(end, tz="Europe/Oslo"):
+            return cached
+
+        new_data = client.query_day_ahead_prices(
+            zone, start=last_date + pd.Timedelta(hours=1), end=end
+        )
+        combined = pd.concat([cached, new_data])
+        combined.to_parquet(cache_path)
+        return combined
+
+    data = client.query_day_ahead_prices(zone, start=start, end=end)
+    data.to_frame("price_eur_mwh").to_parquet(cache_path)
+    return data
 ```
 
 ---
@@ -413,56 +508,72 @@ oil = yf.download("BZ=F", start="2024-01-01", end="2024-12-31")  # Brent crude f
 
 ### Recommended progression (simple to complex)
 
-#### Step 1: Baseline — Linear Regression
-Start here. Predict tomorrow's price using:
-- Yesterday's price (lag-1)
-- Day of week
-- Month
+#### Step 1: Baseline — Naive + Linear Regression
 
-This gives you a baseline to beat and teaches you the pipeline.
+- **Naive baseline:** Tomorrow's price = same hour last week. Surprisingly hard to beat.
+- **Linear regression:** Predict price using lag-1, lag-24, day of week, month.
 
-#### Step 2: Feature-rich — XGBoost / LightGBM
-Gradient boosted trees work very well for tabular data with mixed features:
-- Price lags (1h, 24h, 48h, 168h/1 week)
+These give you a floor to measure all other models against.
+
+#### Step 2: Feature-rich — XGBoost / LightGBM / CatBoost
+
+Gradient boosted trees work well for tabular data:
+- Price lags (1h, 24h, 48h, 168h)
 - Rolling statistics (mean, std of last 24h, 7 days)
-- Weather features (temperature, wind speed, solar radiation)
-- Fuel prices (gas, oil — use lagged values)
+- Weather features (temperature, wind speed, precipitation)
+- Commodity prices (gas, oil — lagged since they're daily)
+- FX rate (EUR/NOK)
 - Calendar features (hour of day, day of week, month, holidays)
-- Cross-border flow data (from ENTSO-E)
 
 ```python
-# Example feature set
 features = [
     "price_lag_1h", "price_lag_24h", "price_lag_168h",
     "price_rolling_mean_24h", "price_rolling_std_24h",
-    "temperature", "wind_speed", "solar_radiation", "precipitation",
+    "temperature", "wind_speed", "precipitation",
     "gas_price_lag_1d", "oil_price_lag_1d",
-    "hour_of_day", "day_of_week", "month", "is_holiday",
+    "hour_of_day", "day_of_week", "month", "is_weekend", "is_holiday",
 ]
 ```
 
-#### Step 3: Time series models (optional)
-Once comfortable:
-- **Prophet** — good for seasonality, easy to use
-- **LSTM / Transformer** — neural networks for sequences (more complex)
+#### Step 3: Ensemble
 
-### Key ML concepts to learn along the way
+Combine XGBoost, LightGBM, and CatBoost predictions (simple average or weighted).
+
+#### Step 4: Time series models (optional, later)
+
+- **Prophet** — good for seasonality, easy to use
+- **LSTM / Transformer** — neural networks for sequences (bigger learning curve)
+
+### Key ML concepts
 
 | Concept | Why it matters |
 |---|---|
-| **Train/test split for time series** | Always split by time, never randomly. Train on past, test on future. |
+| **Train/test split for time series** | Always split by time, never randomly. |
 | **Feature engineering** | Lags, rolling stats, and calendar features matter more than model choice. |
 | **Cross-validation** | Use `TimeSeriesSplit` from scikit-learn, not regular k-fold. |
-| **Evaluation metrics** | MAE (mean absolute error) and RMSE are standard for price forecasting. |
-| **Overfitting** | If train error is much lower than test error, your model memorized noise. |
-| **Feature importance** | XGBoost shows which features matter — use this to iterate. |
+| **Evaluation metrics** | MAE and RMSE are standard for price forecasting. |
+| **Overfitting** | If train error ≪ test error, your model memorized noise. |
+| **Feature importance** | XGBoost/LightGBM show which features matter — use this to iterate. |
+| **Naive baseline** | Always compare against "same hour last week." |
 
 ### Libraries to install
 
 ```
-pip install pandas numpy scikit-learn xgboost lightgbm matplotlib seaborn
-pip install entsoe-py yfinance requests python-dotenv
-pip install streamlit plotly
+# Core
+pip install pandas numpy scikit-learn pyarrow
+
+# ML models
+pip install xgboost lightgbm catboost
+
+# Data sources
+pip install entsoe-py requests python-dotenv
+
+# Visualization & dashboard
+pip install streamlit plotly matplotlib seaborn
+
+# Optional
+pip install yfinance   # Alternative commodity data
+pip install ruff       # Linting
 ```
 
 ---
@@ -471,8 +582,6 @@ pip install streamlit plotly
 
 ### Start simple
 
-Your first Streamlit app should just show a chart:
-
 ```python
 # app/streamlit_app.py
 import streamlit as st
@@ -480,84 +589,127 @@ import pandas as pd
 
 st.title("Electricity Price Forecast — Nordic")
 
-# Load your predictions
-df = pd.read_csv("data/processed/predictions.csv", parse_dates=["timestamp"])
+df = pd.read_parquet("data/processed/prices_all_zones.parquet")
 
-st.line_chart(df.set_index("timestamp")["predicted_price"])
+zone = st.selectbox("Bidding Zone", ["NO1", "NO2", "NO3", "NO4", "NO5"])
+st.line_chart(df[df["zone"] == zone].set_index("timestamp")["price_eur_mwh"])
 ```
 
 Run with: `streamlit run app/streamlit_app.py`
 
 ### Build up incrementally
 
-1. **v1:** Show historical prices as a chart
-2. **v2:** Add weather data overlay
-3. **v3:** Show model predictions vs actual
-4. **v4:** Add zone selector (NO1–NO5)
-5. **v5:** Add feature importance plot
-6. **v6:** Add date range picker and refresh button
+1. **v1:** Historical prices with zone selector
+2. **v2:** Weather data overlay
+3. **v3:** Model predictions vs actual
+4. **v4:** Feature importance plot
+5. **v5:** Date range picker and refresh
+6. **v6:** Anomaly detection highlights
 
 ### Deployment options
 
 | Platform | Cost | Notes |
 |---|---|---|
-| **Streamlit Community Cloud** | Free | Connect to GitHub, auto-deploys. Best for sharing. |
-| **Railway / Render** | Free tier | More control, can run scheduled jobs too. |
-| **Local only** | Free | Just run `streamlit run` on your machine. |
-
-For Streamlit Community Cloud:
-1. Push code to GitHub
-2. Go to share.streamlit.io
-3. Connect your repo
-4. Set `app/streamlit_app.py` as the entry point
-5. Add secrets (API keys) in the Streamlit dashboard
+| **Streamlit Community Cloud** | Free | Connect to GitHub, auto-deploys |
+| **Railway / Render** | Free tier | More control, scheduled jobs |
+| **Local only** | Free | `streamlit run` on your machine |
 
 ---
 
 ## 9. Suggested Learning Path
 
-A step-by-step order to build this project. Each step is a natural stopping point.
-
 ### Phase 1: Foundation (week 1–2)
 - [ ] Set up project structure (folders, venv, requirements.txt)
-- [ ] Register for ENTSO-E API key
-- [ ] Write `src/data/fetch_entsoe.py` — fetch day-ahead prices for one zone
-- [ ] Save raw data to `data/raw/`
+- [ ] Register for ENTSO-E API key (email transparency@entsoe.eu)
+- [ ] Register for Frost API (frost.met.no — just needs email)
+- [ ] Register for CommodityPriceAPI
+- [ ] Write `src/data/fetch_electricity.py` — fetch prices for all 5 zones
+- [ ] Implement caching (check existing data before fetching)
+- [ ] Fetch 8 years of historical data (2017–2025) in yearly chunks
+- [ ] Save raw data to `data/raw/` as Parquet
 - [ ] Explore data in a notebook (`notebooks/exploration.ipynb`)
 
 ### Phase 2: More Data (week 2–3)
-- [ ] Write `src/data/fetch_weather.py` — fetch from Open-Meteo
-- [ ] Write `src/data/fetch_gas.py` — fetch gas/oil prices via yfinance
+- [ ] Write `src/data/fetch_metro.py` — fetch historical weather from Frost API (one station per zone)
+- [ ] Write `src/data/fetch_fx.py` — fetch EUR/NOK from Norges Bank (no key needed)
+- [ ] Write `src/data/fetch_commodity.py` — fetch gas/oil prices
 - [ ] Merge all data sources by timestamp
 - [ ] Save merged data to `data/processed/`
 
 ### Phase 3: Feature Engineering (week 3–4)
-- [ ] Create lag features (price_lag_1h, price_lag_24h, etc.)
-- [ ] Create rolling statistics (mean, std over windows)
-- [ ] Add calendar features (hour, day of week, month, holiday)
-- [ ] Handle missing values
+- [ ] Create lag features (price_lag_1h, price_lag_24h, price_lag_168h)
+- [ ] Create rolling statistics (mean, std over 24h and 168h windows)
+- [ ] Add calendar features (hour, day of week, month, is_weekend, is_holiday)
+- [ ] Handle missing values (interpolation for weather, forward-fill for FX/commodities)
 - [ ] Write `src/features/build_features.py`
 
 ### Phase 4: Modeling (week 4–6)
-- [ ] Implement train/test split by time
-- [ ] Train a linear regression baseline
-- [ ] Evaluate with MAE and RMSE
+- [ ] Implement train/test split by time (e.g., train 2017–2023, test 2024)
+- [ ] Build naive baseline (same hour last week)
+- [ ] Train linear regression
+- [ ] Evaluate baselines with MAE and RMSE
 - [ ] Train XGBoost model
-- [ ] Compare models, analyze feature importance
+- [ ] Train LightGBM and CatBoost
+- [ ] Build simple ensemble (average of three models)
+- [ ] Compare all models, analyze feature importance
 - [ ] Write `src/models/train.py` and `src/models/evaluate.py`
 
 ### Phase 5: Streamlit App (week 6–7)
-- [ ] Build basic Streamlit app showing price chart
-- [ ] Add prediction overlay
-- [ ] Add zone selector and date range
+- [ ] Basic app with price chart and zone selector
+- [ ] Prediction overlay (actual vs predicted)
+- [ ] Feature importance plot
+- [ ] Date range picker
 - [ ] Deploy to Streamlit Community Cloud (optional)
 
-### Phase 6: Iterate & Improve
-- [ ] Try LightGBM, compare with XGBoost
-- [ ] Add more weather stations / zones
-- [ ] Experiment with cross-border flow features
-- [ ] Set up automated daily data refresh
-- [ ] Add confidence intervals to predictions
+### Phase 6: Anomaly Detection & Iteration
+- [ ] XmR control charts on price residuals
+- [ ] Flag anomalous periods in the dashboard
+- [ ] Add Yr/Locationforecast for live weather predictions
+- [ ] Try additional features (cross-border flows, hydro reservoir data)
+- [ ] Automated daily data refresh
+- [ ] Confidence intervals on predictions
+- [ ] Experiment with 15-minute resolution data
+
+---
+
+## 10. MCP Server Setup (Optional)
+
+Set these up later — focus on building the data pipeline first.
+
+### Fetch MCP Server (web requests)
+```json
+{
+  "fetch": {
+    "command": "uvx",
+    "args": ["mcp-server-fetch"]
+  }
+}
+```
+
+### SQLite MCP Server
+```json
+{
+  "sqlite": {
+    "command": "uvx",
+    "args": ["mcp-server-sqlite", "--db-path", "data/cache.db"]
+  }
+}
+```
+
+### GitHub MCP Server
+```json
+{
+  "github": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "env": {
+      "GITHUB_PERSONAL_ACCESS_TOKEN": "<your-token>"
+    }
+  }
+}
+```
+
+Configure in `~/.claude/settings.json` (global) or `.claude/settings.json` (project-level).
 
 ---
 
@@ -568,15 +720,15 @@ A step-by-step order to build this project. Each step is a natural stopping poin
 "Explain time series cross-validation. Why can't I use random splits?"
 
 # Getting started on a task
-"I want to write the ENTSO-E data fetcher. Enter plan mode and help me
-design it, but I'll write the code myself."
+"I want to write fetch_electricity.py for all 5 Norwegian zones.
+Enter plan mode and help me design it, but I'll write the code myself."
 
 # Reviewing your code
-"Review src/data/fetch_entsoe.py — is my error handling correct?
+"Review src/data/fetch_electricity.py — is my error handling correct?
 What edge cases am I missing?"
 
 # Debugging
-"This function returns NaN for some hours. Help me debug — don't fix it,
+"fetch_metro.py returns NaN for some hours. Help me debug — don't fix it,
 just help me understand why."
 
 # Comparing approaches
@@ -586,4 +738,4 @@ What are the trade-offs?"
 
 ---
 
-*This guide is your roadmap. Work through it at your own pace, use Claude Code to learn as you go, and update CLAUDE.md as your project evolves.*
+*This guide is your roadmap. Work through it at your own pace, use Claude Code to learn as you go, and update both CLAUDE.md and this guide as your project evolves.*
