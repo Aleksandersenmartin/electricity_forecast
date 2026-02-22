@@ -61,6 +61,7 @@ electricity_forecast/
 │
 ├── artifacts/                    # Saved model artifacts (.pkl, .joblib)
 │
+├── hooks/                        #Reusable hooks
 ├── app/
 │   └── streamlit_app.py          # Streamlit dashboard
 │
