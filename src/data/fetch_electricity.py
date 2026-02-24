@@ -228,6 +228,37 @@ def fetch_load(
     )
 
 
+def _flatten_generation_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Flatten MultiIndex columns from entsoe-py generation query.
+
+    entsoe-py may return a MultiIndex with levels like
+    ('Actual Aggregated', 'Hydro Water Reservoir'). This extracts only the
+    'Actual Aggregated' rows (production) and flattens to single-level
+    column names like 'Hydro Water Reservoir'.
+
+    If columns are already a flat Index, returns unchanged.
+
+    Args:
+        df: DataFrame from client.query_generation().
+
+    Returns:
+        DataFrame with flat string column names (generation type names).
+    """
+    if df.empty:
+        return df
+
+    if isinstance(df.columns, pd.MultiIndex):
+        # Keep only 'Actual Aggregated' (production), drop 'Actual Consumption'
+        if "Actual Aggregated" in df.columns.get_level_values(0):
+            df = df["Actual Aggregated"]
+        else:
+            # Fallback: just drop the first level
+            df.columns = df.columns.droplevel(0)
+        logger.info("Flattened MultiIndex generation columns → %d types", len(df.columns))
+
+    return df
+
+
 def fetch_generation(
     zone: str,
     start_date: str,
@@ -237,7 +268,8 @@ def fetch_generation(
     """Fetch actual generation per type for a bidding zone.
 
     Returns columns for each production type (Hydro Water Reservoir,
-    Wind Onshore, etc.) in MW.
+    Wind Onshore, etc.) in MW. Handles MultiIndex columns from entsoe-py
+    by flattening to single-level type names.
 
     Args:
         zone: Bidding zone (e.g., "NO_5").
@@ -249,13 +281,14 @@ def fetch_generation(
         DataFrame with one column per generation type (MW), hourly datetime index.
     """
     client = _get_client()
-    return _fetch_yearly_chunks(
+    result = _fetch_yearly_chunks(
         client.query_generation,
         zone, start_date, end_date,
         label="generation",
         cache=cache,
         psr_type=None,
     )
+    return _flatten_generation_columns(result)
 
 
 def fetch_reservoir_filling(
@@ -278,7 +311,7 @@ def fetch_reservoir_filling(
     """
     client = _get_client()
     return _fetch_yearly_chunks(
-        client.query_reservoir_filling,
+        client.query_aggregate_water_reservoirs_and_hydro_storage,
         "NO", start_date, end_date,
         label="reservoir_filling",
         cache=cache,
@@ -354,6 +387,49 @@ def fetch_crossborder_flows(
     return combined
 
 
+# Cable connections per Norwegian zone → foreign zone(s)
+ZONE_CABLES = {
+    "NO_1": ["SE_3"],
+    "NO_2": ["DK_1", "NL", "DE_LU", "GB"],
+    "NO_3": ["SE_2"],
+    "NO_4": ["SE_1", "SE_2", "FI"],
+    "NO_5": [],  # No international cables
+}
+
+# Foreign zones for which day-ahead prices are available on ENTSO-E.
+# GB is excluded: left EU transparency platform, prices return NoMatchingDataError.
+FOREIGN_PRICE_ZONES = ["DK_1", "NL", "DE_LU", "SE_1", "SE_2", "SE_3", "SE_4", "FI"]
+
+
+def fetch_foreign_prices(
+    foreign_zone: str,
+    start_date: str,
+    end_date: str,
+    cache: bool = True,
+) -> pd.DataFrame:
+    """Fetch day-ahead prices for a foreign (non-Norwegian) zone.
+
+    Used to compare Norwegian zone prices with cable endpoint prices
+    for spread and arbitrage analysis.
+
+    Args:
+        foreign_zone: Foreign zone code (e.g., "DK_1", "SE_3", "NL").
+        start_date: Start date as "YYYY-MM-DD".
+        end_date: End date as "YYYY-MM-DD".
+        cache: If True, use yearly Parquet caching.
+
+    Returns:
+        DataFrame with column "prices" (EUR/MWh), hourly datetime index.
+    """
+    client = _get_client()
+    return _fetch_yearly_chunks(
+        client.query_day_ahead_prices,
+        foreign_zone, start_date, end_date,
+        label=f"prices_{foreign_zone}",
+        cache=cache,
+    )
+
+
 def fetch_all_entsoe(
     zone: str,
     start_date: str,
@@ -421,10 +497,10 @@ if __name__ == "__main__":
     print(f"Zones: {list(ZONES.keys())}")
     print()
 
-    # Test: fetch Bergen (NO_5) data from 2020 to current
+    # Test: fetch Bergen (NO_5) data for a small range first
     zone = "NO_5"
-    start = "2020-01-01"
-    end = "2026-02-22"
+    start = "2024-01-01"
+    end = "2024-02-01"
 
     print(f"=== Fetching all ENTSO-E data for {zone} ({start} to {end}) ===\n")
     data = fetch_all_entsoe(zone, start, end)
@@ -440,5 +516,22 @@ if __name__ == "__main__":
         print(f"  Missing values: {df.isna().sum().sum()}")
         print(f"  First 3 rows:")
         print(df.head(3).to_string(max_cols=6))
-        print(f"  Last 3 rows:")
-        print(df.tail(3).to_string(max_cols=6))
+
+    # Test foreign prices
+    print("\n=== Testing foreign prices ===")
+    for fz in FOREIGN_PRICE_ZONES[:3]:  # Test first 3
+        try:
+            fp = fetch_foreign_prices(fz, start, end, cache=True)
+            print(f"  {fz}: {fp.shape[0]} rows, mean={fp.iloc[:, 0].mean():.1f} EUR/MWh")
+        except Exception as e:
+            print(f"  {fz}: ERROR - {e}")
+
+    # Test crossborder flows
+    print("\n=== Testing crossborder flows (NO_2 cables) ===")
+    for cable_to in ZONE_CABLES["NO_2"]:
+        try:
+            flow = fetch_crossborder_flows("NO_2", cable_to, start, end, cache=True)
+            col = flow.columns[0] if not flow.empty else "?"
+            print(f"  NO_2→{cable_to}: {flow.shape[0]} rows, mean={flow.iloc[:, 0].mean():.1f} MW")
+        except Exception as e:
+            print(f"  NO_2→{cable_to}: ERROR - {e}")

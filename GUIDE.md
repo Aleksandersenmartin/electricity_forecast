@@ -36,10 +36,13 @@ electricity_forecast/
 │   ├── __init__.py
 │   ├── data/
 │   │   ├── __init__.py
-│   │   ├── fetch_electricity.py  # ENTSO-E day-ahead prices (all zones)
+│   │   ├── fetch_electricity.py  # ENTSO-E prices, load, generation, flows (all zones)
+│   │   ├── fetch_nordpool.py     # Day-ahead prices via hvakosterstrommen.no (no auth)
 │   │   ├── fetch_metro.py        # Weather (Frost API historical + Yr forecast)
 │   │   ├── fetch_fx.py           # EUR/NOK exchange rates (Norges Bank)
-│   │   └── fetch_commodity.py    # Natural gas / oil prices (CommodityPriceAPI)
+│   │   ├── fetch_commodity.py    # Natural gas / oil prices (CommodityPriceAPI)
+│   │   ├── fetch_reservoir.py    # NVE reservoir filling per zone (no auth)
+│   │   └── fetch_statnett.py     # Statnett physical flows, prod/cons (no auth)
 │   │
 │   ├── features/
 │   │   ├── __init__.py
@@ -220,12 +223,12 @@ __pycache__/
 
 ### Environment variables (`.env`)
 
-Only three keys needed — Norges Bank and Yr require no API keys:
+Three API keys needed — Norges Bank, Yr, NVE, and Statnett require no API keys:
 
 ```
-ENTSOE_API_KEY=your-token-here
-FROST_CLIENT_ID=your-client-id-here
-COMMODITY_API_KEY=your-key-here
+ENTSOE_API_KEY=your-token-here       # Register at transparency.entsoe.eu
+FROST_CLIENT_ID=your-client-id-here  # Register at frost.met.no
+COMMODITY_API_KEY=your-key-here      # Register at commoditypriceapi.com
 ```
 
 Load them with `python-dotenv`:
@@ -243,14 +246,16 @@ api_key = os.getenv("ENTSOE_API_KEY")
 
 ### Authentication overview
 
-| Source | Auth method | Registration |
-|--------|-----------|--------------|
-| **hvakosterstrommen.no** (day-ahead prices) | None (public API) | None |
-| **ENTSO-E** | API token in query params | Register at transparency.entsoe.eu → email transparency@entsoe.eu |
-| **Frost API** (historical weather) | HTTP Basic Auth (client ID as username, empty password) | Register at frost.met.no with email |
-| **Yr / Locationforecast** (forecast weather) | No key — custom `User-Agent` header required | None |
-| **Norges Bank** (FX rates) | Fully open — no auth at all | None |
-| **CommodityPriceAPI** | API key in query params | Register at commoditypriceapi.com |
+| Source | Auth method | Registration | Status |
+|--------|-----------|--------------|--------|
+| **hvakosterstrommen.no** (day-ahead prices) | None (public API) | None | Working |
+| **ENTSO-E** (load, generation, flows) | API token in query params | Register at transparency.entsoe.eu → email transparency@entsoe.eu | Working |
+| **Frost API** (historical weather) | HTTP Basic Auth (client ID as username, empty password) | Register at frost.met.no with email | Working |
+| **Yr / Locationforecast** (forecast weather) | No key — custom `User-Agent` header required | None | Working |
+| **Norges Bank** (FX rates) | Fully open — no auth at all | None | Working |
+| **CommodityPriceAPI** | API key in query params | Register at commoditypriceapi.com | Working |
+| **NVE Magasinstatistikk** (reservoir) | Fully open — no auth at all | None | Working |
+| **Statnett Driftsdata** (flows, prod/cons) | Fully open — no auth at all | None | Working |
 
 ### Day-Ahead Prices — hvakosterstrommen.no — `fetch_nordpool.py`
 
@@ -289,19 +294,21 @@ Current year re-fetches on each run. First full backfill for all 5 zones takes ~
 
 ### ENTSO-E Transparency Platform — `fetch_electricity.py`
 
-Provides load, generation by type, and cross-border flows — data not available from
-hvakosterstrommen.no. Also has prices (same underlying data). Requires an API key.
+Provides load, generation by type, cross-border flows, and reservoir data — data not
+available from hvakosterstrommen.no. Also has prices (same underlying data).
 
-ENTSO-E is the upstream source for Nord Pool day-ahead prices.
+ENTSO-E is the upstream source for Nord Pool day-ahead prices. API key obtained and
+all endpoints verified working (Feb 2026).
 
 | Detail | Info |
 |---|---|
-| **What** | Day-ahead prices, actual generation per type, load, cross-border flows |
+| **What** | Day-ahead prices, actual generation per type, load, cross-border flows, reservoir filling |
 | **API** | REST API — free, requires registration |
 | **Sign up** | https://transparency.entsoe.eu/ → register → email transparency@entsoe.eu |
-| **Python package** | `pip install entsoe-py` |
+| **Python package** | `entsoe-py>=0.7` (v0.7.10 installed) |
 | **Granularity** | Hourly (transitioning to 15-minute in 2025) |
 | **Format** | EUR/MWh |
+| **Status** | All endpoints tested and working |
 
 **Norwegian bidding zones:**
 
@@ -505,6 +512,50 @@ gas = yf.download("NG=F", start="2017-01-01", end="2025-01-31")    # Natural gas
 oil = yf.download("BZ=F", start="2017-01-01", end="2025-01-31")    # Brent crude futures
 ```
 
+### NVE Reservoir Filling — `fetch_reservoir.py`
+
+Per-zone hydro reservoir filling data from NVE (Norwegian Water Resources and Energy Directorate).
+Preferred over ENTSO-E for reservoirs because it provides per-zone breakdown (NO1–NO5),
+while ENTSO-E only has whole-Norway.
+
+| Detail | Info |
+|---|---|
+| **What** | Weekly reservoir filling per zone (% and TWh), since 1995 |
+| **API** | NVE Magasinstatistikk REST API |
+| **Auth** | None — fully open, no registration |
+| **Granularity** | Weekly (forward-filled to hourly in feature pipeline) |
+| **Docs** | `docs/nve_magasin_api_reference.md` |
+
+```python
+from src.data.fetch_reservoir import fetch_reservoir_filling, fetch_reservoir_benchmarks
+
+# Per-zone filling (NO_1–NO_5)
+filling = fetch_reservoir_filling("2020-01-01", "2026-02-01")
+
+# 20-year benchmarks (min/max/median per week per zone)
+benchmarks = fetch_reservoir_benchmarks()
+```
+
+### Statnett Physical Flows — `fetch_statnett.py`
+
+Aggregate physical flows and production/consumption from Statnett (Norwegian TSO).
+Provides national-level data (no per-cable breakdown).
+
+| Detail | Info |
+|---|---|
+| **What** | Daily net exchange (MWh), production/consumption, grid frequency |
+| **API** | Statnett Driftsdata JSON API |
+| **Auth** | None — fully open, no registration |
+| **Granularity** | Daily (exchange, prod/cons), minute/second (frequency) |
+| **Docs** | `docs/statnett_api_reference.md` |
+
+```python
+from src.data.fetch_statnett import fetch_physical_flows, fetch_production_consumption
+
+flows = fetch_physical_flows("2020-01-01", "2026-02-01")
+prodcons = fetch_production_consumption("2020-01-01", "2026-02-01")
+```
+
 ---
 
 ## 6. Data Caching Strategy
@@ -691,32 +742,36 @@ Run with: `streamlit run app/streamlit_app.py`
 
 ## 9. Suggested Learning Path
 
-### Phase 1: Foundation (week 1–2)
-- [ ] Set up project structure (folders, venv, requirements.txt)
-- [ ] Register for ENTSO-E API key (email transparency@entsoe.eu)
-- [ ] Register for Frost API (frost.met.no — just needs email)
-- [ ] Register for CommodityPriceAPI
-- [ ] Write `src/data/fetch_electricity.py` — fetch prices for all 5 zones
-- [ ] Implement caching (check existing data before fetching)
-- [ ] Fetch 8 years of historical data (2017–2025) in yearly chunks
-- [ ] Save raw data to `data/raw/` as Parquet
-- [ ] Explore data in a notebook (`notebooks/exploration.ipynb`)
+### Phase 1: Foundation (week 1–2) — COMPLETE
+- [x] Set up project structure (folders, venv, requirements.txt)
+- [x] Register for ENTSO-E API key (email transparency@entsoe.eu)
+- [x] Register for Frost API (frost.met.no — just needs email)
+- [x] Register for CommodityPriceAPI
+- [x] Write `src/data/fetch_electricity.py` — ENTSO-E prices, load, generation, flows for all 5 zones
+- [x] Write `src/data/fetch_nordpool.py` — day-ahead prices via hvakosterstrommen.no (free, no auth)
+- [x] Implement caching (yearly Parquet chunks, check existing data before fetching)
+- [x] Save raw data to `data/raw/` as Parquet
+- [x] Explore data in notebooks (`notebooks/01–07`)
 
-### Phase 2: More Data (week 2–3)
-- [ ] Write `src/data/fetch_metro.py` — fetch historical weather from Frost API (one station per zone)
-- [ ] Write `src/data/fetch_fx.py` — fetch EUR/NOK from Norges Bank (no key needed)
-- [ ] Write `src/data/fetch_commodity.py` — fetch gas/oil prices
-- [ ] Merge all data sources by timestamp
-- [ ] Save merged data to `data/processed/`
+### Phase 1b: Additional Data Sources — COMPLETE
+- [x] Write `src/data/fetch_metro.py` — fetch historical weather from Frost API (one station per zone)
+- [x] Write `src/data/fetch_fx.py` — fetch EUR/NOK from Norges Bank (no key needed)
+- [x] Write `src/data/fetch_commodity.py` — fetch gas/oil prices (yfinance + CommodityPriceAPI)
+- [x] Write `src/data/fetch_reservoir.py` — NVE reservoir filling per zone (no auth, since 1995)
+- [x] Write `src/data/fetch_statnett.py` — physical flows, production/consumption, grid frequency
 
-### Phase 3: Feature Engineering (week 3–4)
-- [ ] Create lag features (price_lag_1h, price_lag_24h, price_lag_168h)
-- [ ] Create rolling statistics (mean, std over 24h and 168h windows)
-- [ ] Add calendar features (hour, day of week, month, is_weekend, is_holiday)
-- [ ] Handle missing values (interpolation for weather, forward-fill for FX/commodities)
-- [ ] Write `src/features/build_features.py`
+### Phase 2: Feature Engineering (week 3–4) — COMPLETE
+- [x] Create lag features (price_lag_1h, price_lag_24h, price_lag_168h)
+- [x] Create rolling statistics (mean, std over 24h and 168h windows)
+- [x] Add calendar features (hour, day of week, month, is_weekend, is_holiday)
+- [x] Handle missing values (interpolation for weather, forward-fill for FX/commodities)
+- [x] Write `src/features/build_features.py` (~45 features per zone)
+- [x] EUR → NOK price conversion (price_nok_mwh, price_nok_kwh + full lag/rolling/diff)
+- [x] ENTSO-E integration (load, generation, cross-border flows auto-detected)
+- [x] All-zone orchestrator with Parquet caching
+- [x] Merge all data sources on hourly Europe/Oslo spine
 
-### Phase 3.5: Statistical Inference (week 4)
+### Phase 2.5: Statistical Inference (week 4) — COMPLETE
 
 Before jumping into modeling, apply formal statistical methods to understand the data.
 This validates assumptions, identifies key relationships, and informs feature selection.
@@ -751,7 +806,7 @@ See `notebooks/08_statistical_inference_analysis.ipynb` for full implementation.
 | ACF | `statsmodels.tsa.stattools.acf()` | Autocorrelation at each lag | Correlation values |
 | PACF | `statsmodels.tsa.stattools.pacf()` | Direct (partial) autocorrelation | Correlation values |
 
-### Phase 4: Modeling (week 4–6)
+### Phase 3: Modeling (week 5–7)
 - [ ] Implement train/test split by time (e.g., train 2017–2023, test 2024)
 - [ ] Build naive baseline (same hour last week)
 - [ ] Train linear regression
@@ -762,14 +817,14 @@ See `notebooks/08_statistical_inference_analysis.ipynb` for full implementation.
 - [ ] Compare all models, analyze feature importance
 - [ ] Write `src/models/train.py` and `src/models/evaluate.py`
 
-### Phase 5: Streamlit App (week 6–7)
+### Phase 4: Streamlit App (week 7–8)
 - [ ] Basic app with price chart and zone selector
 - [ ] Prediction overlay (actual vs predicted)
 - [ ] Feature importance plot
 - [ ] Date range picker
 - [ ] Deploy to Streamlit Community Cloud (optional)
 
-### Phase 6: Anomaly Detection & Iteration
+### Phase 5: Anomaly Detection & Iteration
 - [ ] XmR control charts on price residuals
 - [ ] Flag anomalous periods in the dashboard
 - [ ] Add Yr/Locationforecast for live weather predictions

@@ -25,7 +25,27 @@ from src.data.fetch_commodity import fetch_commodities_daily_filled
 from src.data.fetch_reservoir import fetch_zone_reservoir_with_benchmarks
 from src.data.fetch_statnett import fetch_physical_flows, fetch_production_consumption
 
-from src.data.fetch_nordpool import fetch_prices as fetch_nordpool_prices
+# ENTSO-E imports — primary data source for prices, load, generation, flows
+try:
+    from src.data.fetch_electricity import (
+        fetch_prices as fetch_entsoe_prices,
+        fetch_load as fetch_entsoe_load,
+        fetch_generation as fetch_entsoe_generation,
+        fetch_crossborder_flows as fetch_entsoe_flows,
+        fetch_foreign_prices as fetch_entsoe_foreign_prices,
+        ZONE_CABLES,
+        FOREIGN_PRICE_ZONES,
+    )
+    ENTSOE_AVAILABLE = True
+except Exception:
+    ENTSOE_AVAILABLE = False
+
+# Nord Pool — fallback if ENTSO-E key is not set
+try:
+    from src.data.fetch_nordpool import fetch_prices as fetch_nordpool_prices
+    NORDPOOL_AVAILABLE = True
+except Exception:
+    NORDPOOL_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +289,209 @@ def build_statnett_features(
 
 
 # ---------------------------------------------------------------------------
-# 7. EUR → NOK Price Conversion
+# 7. ENTSO-E Load Features
+# ---------------------------------------------------------------------------
+
+def build_entsoe_load_features(
+    zone: str,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """Fetch ENTSO-E actual load (MW) and derive lag features.
+
+    Args:
+        zone: Bidding zone (e.g., "NO_5").
+        start_date: Start date as "YYYY-MM-DD".
+        end_date: End date as "YYYY-MM-DD".
+
+    Returns:
+        DataFrame with columns: actual_load, load_lag_24h, load_lag_168h,
+        load_rolling_24h_mean. Empty DataFrame if ENTSO-E unavailable.
+    """
+    if not ENTSOE_AVAILABLE:
+        logger.info("ENTSO-E load: skipped (entsoe-py not available)")
+        return pd.DataFrame()
+
+    try:
+        raw = fetch_entsoe_load(zone, start_date, end_date, cache=True)
+    except Exception as e:
+        logger.warning("ENTSO-E load unavailable for %s: %s", zone, e)
+        return pd.DataFrame()
+
+    if raw.empty:
+        return pd.DataFrame()
+
+    # Extract the load column (entsoe-py returns 'Actual Load')
+    load_col = raw.columns[0] if len(raw.columns) > 0 else None
+    if load_col is None:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(index=raw.index)
+    df["actual_load"] = raw[load_col]
+    df["load_lag_24h"] = df["actual_load"].shift(24)
+    df["load_lag_168h"] = df["actual_load"].shift(168)
+    df["load_rolling_24h_mean"] = df["actual_load"].rolling(window=24, min_periods=1).mean()
+
+    logger.info("ENTSO-E load features (%s): %d rows, %d columns", zone, len(df), len(df.columns))
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 8. ENTSO-E Generation Features
+# ---------------------------------------------------------------------------
+
+# PSR type groupings for aggregation
+_HYDRO_TYPES = {"Hydro Water Reservoir", "Hydro Run-of-river and poundage", "Hydro Pumped Storage"}
+_WIND_TYPES = {"Wind Onshore", "Wind Offshore"}
+
+
+def build_entsoe_generation_features(
+    zone: str,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """Fetch ENTSO-E generation per type and derive aggregate features.
+
+    Aggregates generation into hydro, wind, and total. Computes shares.
+
+    Args:
+        zone: Bidding zone (e.g., "NO_5").
+        start_date: Start date as "YYYY-MM-DD".
+        end_date: End date as "YYYY-MM-DD".
+
+    Returns:
+        DataFrame with columns: generation_hydro, generation_wind,
+        generation_total, hydro_share, wind_share.
+        Empty DataFrame if ENTSO-E unavailable.
+    """
+    if not ENTSOE_AVAILABLE:
+        logger.info("ENTSO-E generation: skipped (entsoe-py not available)")
+        return pd.DataFrame()
+
+    try:
+        raw = fetch_entsoe_generation(zone, start_date, end_date, cache=True)
+    except Exception as e:
+        logger.warning("ENTSO-E generation unavailable for %s: %s", zone, e)
+        return pd.DataFrame()
+
+    if raw.empty:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(index=raw.index)
+
+    # Aggregate hydro types (B10 + B11 + B12)
+    hydro_cols = [c for c in raw.columns if c in _HYDRO_TYPES]
+    df["generation_hydro"] = raw[hydro_cols].sum(axis=1) if hydro_cols else 0
+
+    # Aggregate wind types (B18 + B19)
+    wind_cols = [c for c in raw.columns if c in _WIND_TYPES]
+    df["generation_wind"] = raw[wind_cols].sum(axis=1) if wind_cols else 0
+
+    # Total generation
+    df["generation_total"] = raw.sum(axis=1)
+
+    # Shares (avoid division by zero)
+    df["hydro_share"] = df["generation_hydro"] / df["generation_total"].replace(0, np.nan)
+    df["wind_share"] = df["generation_wind"] / df["generation_total"].replace(0, np.nan)
+
+    logger.info("ENTSO-E generation features (%s): %d rows, %d columns", zone, len(df), len(df.columns))
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 9. ENTSO-E Cross-Border Flow Features
+# ---------------------------------------------------------------------------
+
+def build_entsoe_flow_features(
+    zone: str,
+    start_date: str,
+    end_date: str,
+    eur_nok_hourly: pd.Series | None = None,
+) -> pd.DataFrame:
+    """Fetch ENTSO-E crossborder flows and foreign prices per cable.
+
+    For each cable connected to the zone, fetches:
+    - Net flow (MW, positive = export from Norway)
+    - Foreign zone day-ahead price (EUR/MWh)
+    - Price spread (Norwegian zone minus foreign zone)
+    - Foreign price in NOK/kWh (when FX available)
+
+    Also computes aggregate features: total_net_export, n_cables_exporting.
+
+    Args:
+        zone: Norwegian bidding zone (e.g., "NO_2").
+        start_date: Start date as "YYYY-MM-DD".
+        end_date: End date as "YYYY-MM-DD".
+        eur_nok_hourly: Optional hourly EUR/NOK exchange rate Series
+            for converting foreign prices to NOK/kWh.
+
+    Returns:
+        DataFrame with per-cable flow/price/spread columns plus aggregates.
+        Empty DataFrame if ENTSO-E unavailable or zone has no cables.
+    """
+    if not ENTSOE_AVAILABLE:
+        logger.info("ENTSO-E flows: skipped (entsoe-py not available)")
+        return pd.DataFrame()
+
+    cables = ZONE_CABLES.get(zone, [])
+    if not cables:
+        logger.info("ENTSO-E flows: %s has no international cables", zone)
+        return pd.DataFrame()
+
+    # Create hourly spine for alignment
+    hourly_index = pd.date_range(start=start_date, end=end_date, freq="h", tz="Europe/Oslo")
+
+    df = pd.DataFrame(index=hourly_index)
+    flow_cols = []
+
+    for foreign_zone in cables:
+        fz_lower = foreign_zone.lower().replace("_", "")
+        prefix = f"flow_{zone.lower()}_{fz_lower}"
+
+        # Fetch net flow (direction: Norwegian zone → foreign zone)
+        try:
+            flow_raw = fetch_entsoe_flows(zone, foreign_zone, start_date, end_date, cache=True)
+            if not flow_raw.empty:
+                flow_series = flow_raw.iloc[:, 0]
+                # Resample to hourly if 15-min data (e.g., DE_LU)
+                if len(flow_series) > len(hourly_index) * 1.2:
+                    flow_series = flow_series.resample("h").mean()
+                df[prefix] = flow_series.reindex(hourly_index, method="nearest", tolerance="1h")
+                flow_cols.append(prefix)
+        except Exception as e:
+            logger.warning("Flow %s→%s failed: %s", zone, foreign_zone, e)
+
+        # Fetch foreign zone price
+        if foreign_zone in FOREIGN_PRICE_ZONES:
+            try:
+                fp_raw = fetch_entsoe_foreign_prices(foreign_zone, start_date, end_date, cache=True)
+                if not fp_raw.empty:
+                    price_series = fp_raw.iloc[:, 0]
+                    price_col = f"price_{fz_lower}_eur_mwh"
+                    df[price_col] = price_series.reindex(hourly_index, method="nearest", tolerance="1h")
+
+                    # Convert to NOK/kWh if FX available
+                    if eur_nok_hourly is not None:
+                        fx_aligned = eur_nok_hourly.reindex(hourly_index, method="ffill")
+                        nok_col = f"price_{fz_lower}_nok_kwh"
+                        df[nok_col] = df[price_col] * fx_aligned / 1000
+            except Exception as e:
+                logger.warning("Foreign prices for %s failed: %s", foreign_zone, e)
+
+    # Aggregate flow features
+    if flow_cols:
+        df["total_net_export"] = df[flow_cols].sum(axis=1)
+        df["n_cables_exporting"] = (df[flow_cols] > 0).sum(axis=1)
+
+    # Drop rows that are all NaN (outside data range)
+    df = df.dropna(how="all")
+
+    logger.info("ENTSO-E flow features (%s): %d rows, %d columns", zone, len(df), len(df.columns))
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 10. EUR → NOK Price Conversion
 # ---------------------------------------------------------------------------
 
 def _convert_eur_to_nok(
@@ -430,6 +652,72 @@ def build_nordpool_price_features(
 
 
 # ---------------------------------------------------------------------------
+# 8c. ENTSO-E Price Features (primary source)
+# ---------------------------------------------------------------------------
+
+def build_entsoe_price_features(
+    zone: str,
+    start_date: str,
+    end_date: str,
+    eur_nok_hourly: pd.Series | None = None,
+) -> pd.DataFrame:
+    """Fetch ENTSO-E day-ahead prices and build autoregressive price features.
+
+    Downloads day-ahead prices for a single zone via the ENTSO-E Transparency
+    Platform, and derives lag/rolling/diff features using build_price_features().
+    When eur_nok_hourly is provided, also computes price_nok_mwh and
+    price_nok_kwh base columns.
+
+    Args:
+        zone: Bidding zone (e.g., "NO_5").
+        start_date: Start date as "YYYY-MM-DD".
+        end_date: End date as "YYYY-MM-DD".
+        eur_nok_hourly: Optional hourly EUR/NOK exchange rate Series.
+            When provided, adds price_nok_mwh and price_nok_kwh columns.
+
+    Returns:
+        DataFrame with columns: price_eur_mwh, price_lag_1h, price_lag_24h,
+        price_lag_168h, price_rolling_24h_mean, price_rolling_24h_std,
+        price_rolling_168h_mean, price_diff_24h, price_diff_168h,
+        and optionally price_nok_mwh, price_nok_kwh.
+        Empty DataFrame if ENTSO-E data is unavailable.
+    """
+    prices_raw = fetch_entsoe_prices(zone, start_date, end_date, cache=True)
+
+    if prices_raw.empty:
+        logger.warning("No ENTSO-E prices for %s", zone)
+        return pd.DataFrame()
+
+    # ENTSO-E returns a Series or single-column DataFrame
+    if isinstance(prices_raw, pd.DataFrame):
+        zone_prices = prices_raw.iloc[:, 0].rename("price_eur_mwh")
+    else:
+        zone_prices = prices_raw.rename("price_eur_mwh")
+
+    # Build autoregressive features from the price series
+    lag_features = build_price_features(zone_prices)
+
+    # Combine raw price + derived features
+    result = zone_prices.to_frame()
+    if not lag_features.empty:
+        result = result.join(lag_features, how="left")
+
+    # Add NOK price base columns if FX rate is available
+    if eur_nok_hourly is not None:
+        aligned_fx = eur_nok_hourly.reindex(result.index, method="ffill")
+        nok_mwh, nok_kwh = _convert_eur_to_nok(result["price_eur_mwh"], aligned_fx)
+        result["price_nok_mwh"] = nok_mwh
+        result["price_nok_kwh"] = nok_kwh
+        logger.info("Added NOK price columns (price_nok_mwh, price_nok_kwh)")
+
+    logger.info(
+        "ENTSO-E price features (%s): %d rows, %d columns",
+        zone, len(result), len(result.columns),
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 9. Orchestrator — Merge all features
 # ---------------------------------------------------------------------------
 
@@ -528,17 +816,30 @@ def build_feature_matrix(
 
     # --- Price features (hourly) ---
 
-    # Option A: ENTSO-E prices passed explicitly
+    # Option A: Pre-built prices passed explicitly
     try:
         price_feats = build_price_features(prices)
         if not price_feats.empty:
             result = result.join(price_feats, how="left")
-            logger.info("Merged ENTSO-E price features: +%d columns", len(price_feats.columns))
+            logger.info("Merged explicit price features: +%d columns", len(price_feats.columns))
     except Exception as e:
-        logger.error("Failed to build ENTSO-E price features: %s", e)
+        logger.debug("No explicit prices passed: %s", e)
 
-    # Option B: Nord Pool prices (fallback if ENTSO-E not provided)
-    if "price_eur_mwh" not in result.columns:
+    # Option B: ENTSO-E prices (primary source)
+    if "price_eur_mwh" not in result.columns and ENTSOE_AVAILABLE:
+        try:
+            entsoe_price_feats = build_entsoe_price_features(
+                zone, start_date, end_date,
+                eur_nok_hourly=fx_hourly_series,
+            )
+            if not entsoe_price_feats.empty:
+                result = result.join(entsoe_price_feats, how="left")
+                logger.info("Merged ENTSO-E price features: +%d columns", len(entsoe_price_feats.columns))
+        except Exception as e:
+            logger.warning("ENTSO-E price features failed: %s", e)
+
+    # Option C: Nord Pool prices (fallback if ENTSO-E unavailable)
+    if "price_eur_mwh" not in result.columns and NORDPOOL_AVAILABLE:
         try:
             nordpool_feats = build_nordpool_price_features(
                 zone, start_date, end_date,
@@ -546,7 +847,7 @@ def build_feature_matrix(
             )
             if not nordpool_feats.empty:
                 result = result.join(nordpool_feats, how="left")
-                logger.info("Merged Nord Pool price features: +%d columns", len(nordpool_feats.columns))
+                logger.info("Merged Nord Pool price features (fallback): +%d columns", len(nordpool_feats.columns))
         except Exception as e:
             logger.warning("Nord Pool price features unavailable: %s", e)
 
@@ -559,6 +860,39 @@ def build_feature_matrix(
                 logger.info("Merged NOK price features: +%d columns", len(nok_feats.columns))
         except Exception as e:
             logger.error("Failed to build NOK price features: %s", e)
+
+    # --- ENTSO-E hourly sources (load, generation, flows) ---
+
+    if ENTSOE_AVAILABLE:
+        # ENTSO-E Load (per-zone consumption)
+        try:
+            entsoe_load = build_entsoe_load_features(zone, start_date, end_date)
+            if not entsoe_load.empty:
+                result = result.join(entsoe_load, how="left")
+                logger.info("Merged ENTSO-E load: +%d columns", len(entsoe_load.columns))
+        except Exception as e:
+            logger.warning("ENTSO-E load features failed: %s", e)
+
+        # ENTSO-E Generation (per-zone production mix)
+        try:
+            entsoe_gen = build_entsoe_generation_features(zone, start_date, end_date)
+            if not entsoe_gen.empty:
+                result = result.join(entsoe_gen, how="left")
+                logger.info("Merged ENTSO-E generation: +%d columns", len(entsoe_gen.columns))
+        except Exception as e:
+            logger.warning("ENTSO-E generation features failed: %s", e)
+
+        # ENTSO-E Cross-border flows (per-cable flows + foreign prices)
+        try:
+            entsoe_flows = build_entsoe_flow_features(
+                zone, start_date, end_date,
+                eur_nok_hourly=fx_hourly_series,
+            )
+            if not entsoe_flows.empty:
+                result = result.join(entsoe_flows, how="left")
+                logger.info("Merged ENTSO-E flows: +%d columns", len(entsoe_flows.columns))
+        except Exception as e:
+            logger.warning("ENTSO-E flow features failed: %s", e)
 
     # --- Daily sources (resample to hourly) ---
 

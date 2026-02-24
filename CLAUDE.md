@@ -621,7 +621,7 @@ Nord Pool provides price data (no key needed), unblocking Phase 2.
    ✅ API docs written (ENTSO-E, Frost, CommodityPriceAPI, NVE Magasin, Statnett)
    ✅ Frost API client ID obtained
    ✅ CommodityPriceAPI key obtained
-   ⬜ ENTSO-E API key (waiting for email — fetch_electricity.py is ready to use once key arrives)
+   ✅ ENTSO-E API key obtained and tested (all endpoints verified)
 
 ✅ Phase 1a: fetch_metro.py — Frost API weather data
    ✅ Yearly chunking + pagination (nextLink handling)
@@ -649,14 +649,19 @@ Nord Pool provides price data (no key needed), unblocking Phase 2.
    ✅ Zone format mapping: project "NO_1" ↔ API "NO1"
    ✅ Graceful error handling: skips missing days, exponential backoff
 
-⏳ Phase 1d-alt: fetch_electricity.py — ENTSO-E prices, load, generation, flows
+✅ Phase 1d-alt: fetch_electricity.py — ENTSO-E prices, load, generation, flows
    ✅ Code complete: fetch_prices, fetch_load, fetch_generation,
-     fetch_reservoir_filling, fetch_crossborder_flows, fetch_all_entsoe
-   ✅ Uses entsoe-py with yearly chunking + caching
+     fetch_reservoir_filling, fetch_crossborder_flows, fetch_foreign_prices, fetch_all_entsoe
+   ✅ Uses entsoe-py (v0.7.10) with yearly chunking + caching
    ✅ Graceful error when key missing (clear setup instructions)
-   ⬜ NOT TESTED — waiting for ENTSOE_API_KEY (optional, Nord Pool covers prices)
-   → Set key in .env: ENTSOE_API_KEY=your-key-here
-   → Then run: python -m src.data.fetch_electricity
+   ✅ API key obtained and all endpoints tested (Feb 2026):
+     - fetch_prices: NO_1 day-ahead prices (EUR/MWh, hourly) ✓
+     - fetch_load: actual total load (MW, hourly) ✓
+     - fetch_generation: per-type generation (Biomass, Fossil Gas, Hydro, Waste, Wind) ✓
+     - fetch_crossborder_flows: NO_2→DK_1 flows (MW, hourly) ✓
+     - fetch_foreign_prices: DK_1 prices (EUR/MWh) ✓
+     - fetch_reservoir_filling: whole-Norway weekly (MWh) ✓ (NVE preferred for per-zone)
+   ✅ build_features.py auto-detects ENTSOE_AVAILABLE and includes load/generation/flow features
 
 ✅ Phase 1e: fetch_reservoir.py — NVE reservoir filling per zone
    ✅ All zones (NO1–NO5) since 1995 in one API call
@@ -691,7 +696,7 @@ Nord Pool provides price data (no key needed), unblocking Phase 2.
    ✅ Autocorrelation & stationarity (ADF, KPSS, ACF/PACF up to 168h lags)
    ✅ Key findings compiled with modeling recommendations for Phase 3
 
-🔲 Phase 3: Baseline models (naive + linear regression)
+🔲 Phase 3: Forecasting nve 
 🔲 Phase 4: XGBoost / LightGBM / CatBoost / ensemble
 🔲 Phase 5: Streamlit dashboard (incl. Tab 5: Cable Arbitrage)
 🔲 Phase 6: Anomaly detection + Cable Arbitrage Analysis
@@ -750,12 +755,12 @@ I'll explain the concept, then we implement together.
 - [x] fetch_fx.py — EUR/NOK exchange rates (Norges Bank), tested 2020–2026
 - [x] fetch_commodity.py — gas/oil/coal (yfinance + CommodityPriceAPI), tested 2020–2026
 - [x] fetch_nordpool.py — day-ahead prices via hvakosterstrommen.no (free, no auth, Oct 2021+)
-- [x] fetch_electricity.py — ENTSO-E prices/load/generation/flows (code complete, awaiting API key)
+- [x] fetch_electricity.py — ENTSO-E prices/load/generation/flows (fully tested, all endpoints working)
 - [x] fetch_reservoir.py — NVE reservoir filling per zone, tested with Bergen 2020–2026
 - [x] fetch_statnett.py — physical flows, prod/cons, overview, power situation, frequency
 - [x] build_features.py — feature engineering with Nord Pool price integration
 - [x] Notebook 08 — Statistical inference analysis (distributions, STL, Granger, OLS, ADF/KPSS, ACF/PACF)
-- [ ] ENTSO-E API key (optional — Nord Pool covers prices; set in .env for load/generation data)
+- [x] ENTSO-E API key obtained — load, generation, cross-border flows now available
 - [ ] Baseline models (naive + linear regression)
 - [ ] Model training (XGBoost / LightGBM / CatBoost → ensemble)
 - [ ] Streamlit dashboard
