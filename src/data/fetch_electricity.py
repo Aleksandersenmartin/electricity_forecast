@@ -123,15 +123,18 @@ def _fetch_yearly_chunks(
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     all_chunks = []
+    current_year = pd.Timestamp.now().year
 
     year = start.year
     while year <= end.year:
         chunk_start_str = f"{year}-01-01" if year > start.year else start_date
         chunk_end_str = f"{year}-12-31" if year < end.year else end_date
+        is_current_year = (year == current_year)
 
         cp = _cache_path(label, zone, year)
 
-        if cache and cp.exists():
+        # Use cache for completed years only; always re-fetch the current year
+        if cache and cp.exists() and not is_current_year:
             logger.info("Loading cached %s for %s %d", label, zone, year)
             chunk = pd.read_parquet(cp)
             all_chunks.append(chunk)
@@ -346,14 +349,17 @@ def fetch_crossborder_flows(
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     all_chunks = []
+    current_year = pd.Timestamp.now().year
     year = start.year
 
     while year <= end.year:
         chunk_start = f"{year}-01-01" if year > start.year else start_date
         chunk_end = f"{year}-12-31" if year < end.year else end_date
+        is_current_year = (year == current_year)
         cp = cache_dir / f"entsoe_{label}_{year}.parquet"
 
-        if cache and cp.exists():
+        # Use cache for completed years only; always re-fetch the current year
+        if cache and cp.exists() and not is_current_year:
             logger.info("Loading cached %s %d", label, year)
             all_chunks.append(pd.read_parquet(cp))
             year += 1
