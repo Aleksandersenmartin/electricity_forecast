@@ -396,6 +396,15 @@ ZONE_CABLES = {
     "NO_5": [],  # No international cables
 }
 
+# Internal connections between Norwegian bidding zones
+ZONE_INTERNAL = {
+    "NO_1": ["NO_2", "NO_3", "NO_5"],
+    "NO_2": ["NO_1", "NO_5"],
+    "NO_3": ["NO_1", "NO_4", "NO_5"],
+    "NO_4": ["NO_3"],
+    "NO_5": ["NO_1", "NO_2", "NO_3"],
+}
+
 # Foreign zones for which day-ahead prices are available on ENTSO-E.
 # GB is excluded: left EU transparency platform, prices return NoMatchingDataError.
 FOREIGN_PRICE_ZONES = ["DK_1", "NL", "DE_LU", "SE_1", "SE_2", "SE_3", "SE_4", "FI"]

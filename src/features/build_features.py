@@ -34,6 +34,7 @@ try:
         fetch_crossborder_flows as fetch_entsoe_flows,
         fetch_foreign_prices as fetch_entsoe_foreign_prices,
         ZONE_CABLES,
+        ZONE_INTERNAL,
         FOREIGN_PRICE_ZONES,
     )
     ENTSOE_AVAILABLE = True
@@ -491,6 +492,79 @@ def build_entsoe_flow_features(
 
 
 # ---------------------------------------------------------------------------
+# 9b. Internal Norwegian Zone Flow Features
+# ---------------------------------------------------------------------------
+
+def build_internal_flow_features(
+    zone: str,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """Fetch internal flows between Norwegian bidding zones.
+
+    For each neighboring Norwegian zone, fetches the physical flow
+    INTO the target zone (neighbor → zone). Positive values mean
+    power is flowing into the zone (import); negative means export.
+
+    Also computes aggregate features: total internal import, export,
+    and net flow.
+
+    Args:
+        zone: Norwegian bidding zone (e.g., "NO_5").
+        start_date: Start date as "YYYY-MM-DD".
+        end_date: End date as "YYYY-MM-DD".
+
+    Returns:
+        DataFrame with per-neighbor flow columns plus aggregates.
+        Empty DataFrame if ENTSO-E unavailable or zone has no
+        internal connections.
+    """
+    if not ENTSOE_AVAILABLE:
+        logger.info("Internal flows: skipped (entsoe-py not available)")
+        return pd.DataFrame()
+
+    neighbors = ZONE_INTERNAL.get(zone, [])
+    if not neighbors:
+        logger.info("Internal flows: %s has no internal connections", zone)
+        return pd.DataFrame()
+
+    # Create hourly spine for alignment
+    hourly_index = pd.date_range(start=start_date, end=end_date, freq="h", tz="Europe/Oslo")
+
+    df = pd.DataFrame(index=hourly_index)
+    flow_cols = []
+
+    for neighbor in neighbors:
+        col_name = f"flow_from_{neighbor.lower()}"
+
+        # Fetch flow: neighbor → zone (positive = import into our zone)
+        try:
+            flow_raw = fetch_entsoe_flows(neighbor, zone, start_date, end_date, cache=True)
+            if not flow_raw.empty:
+                flow_series = flow_raw.iloc[:, 0]
+                # Resample to hourly if higher resolution
+                if len(flow_series) > len(hourly_index) * 1.2:
+                    flow_series = flow_series.resample("h").mean()
+                df[col_name] = flow_series.reindex(hourly_index, method="nearest", tolerance="1h")
+                flow_cols.append(col_name)
+        except Exception as e:
+            logger.warning("Internal flow %s→%s failed: %s", neighbor, zone, e)
+
+    # Aggregate features
+    if flow_cols:
+        flow_matrix = df[flow_cols]
+        df["total_internal_import"] = flow_matrix.clip(lower=0).sum(axis=1)
+        df["total_internal_export"] = flow_matrix.clip(upper=0).abs().sum(axis=1)
+        df["net_internal_flow"] = flow_matrix.sum(axis=1)
+
+    # Drop rows that are all NaN (outside data range)
+    df = df.dropna(how="all")
+
+    logger.info("Internal flow features (%s): %d rows, %d columns", zone, len(df), len(df.columns))
+    return df
+
+
+# ---------------------------------------------------------------------------
 # 10. EUR → NOK Price Conversion
 # ---------------------------------------------------------------------------
 
@@ -893,6 +967,15 @@ def build_feature_matrix(
                 logger.info("Merged ENTSO-E flows: +%d columns", len(entsoe_flows.columns))
         except Exception as e:
             logger.warning("ENTSO-E flow features failed: %s", e)
+
+        # Internal Norwegian zone flows
+        try:
+            internal_flows = build_internal_flow_features(zone, start_date, end_date)
+            if not internal_flows.empty:
+                result = result.join(internal_flows, how="left")
+                logger.info("Merged internal flows: +%d columns", len(internal_flows.columns))
+        except Exception as e:
+            logger.warning("Internal flow features failed: %s", e)
 
     # --- Daily sources (resample to hourly) ---
 

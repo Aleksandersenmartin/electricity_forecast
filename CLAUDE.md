@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Nordic electricity price forecasting using ML. Predicts day-ahead prices for Norwegian bidding zones (NO1–NO5) using weather data (wind, sun, temperature, rain), fuel prices (natural gas, oil), FX rates, and historical price patterns. Early stage — building incrementally to learn ML concepts.
+Nordic electricity market forecasting using ML. Predicts day-ahead prices, demand, production, reservoir levels, and trade flows for Norwegian bidding zones (NO1–NO5) using weather data (wind, temperature, precipitation), fuel prices (natural gas, oil), FX rates, reservoir levels, and grid data. Building incrementally to learn ML concepts.
 
 MIT licensed, authored by Aleksandersenmartin.
 
@@ -23,13 +23,15 @@ src/
         fetch_commodity.py     # Natural gas / oil prices (CommodityPriceAPI)
         fetch_reservoir.py     # NVE reservoir filling per zone (no auth needed)
         fetch_statnett.py      # Statnett physical flows, production/consumption, frequency (no auth)
+        fetch_yr_forecast.py   # Yr Locationforecast weather (~9 days ahead, per zone)
     features/
         __init__.py
         build_features.py      # Feature engineering (lags, rolling stats, etc.)
     models/
         __init__.py
-        train.py               # Training pipeline
-        evaluate.py            # Metrics and evaluation
+        train.py               # Training pipeline (MLPriceForecaster, train_ensemble, walk_forward_validate, forecast_with_yr)
+        evaluate.py            # Metrics and evaluation (compute_metrics, comparison_table, plot_forecast, plot_residuals)
+        forecasters.py         # Statistical forecasters (NaiveForecaster, ARIMAForecaster, SARIMAXForecaster, etc.)
         predict.py             # Inference / forecasting
     utils/
         __init__.py
@@ -125,6 +127,7 @@ All keys stored in `.env`, loaded with `python-dotenv`. See `.env.example` for t
 - Norges Bank FX has no weekend/holiday data — forward-fill needed
 - Yr Locationforecast requires `User-Agent` header with app name + contact info
 - Store raw data as Parquet (not CSV) to preserve dtypes and timezones
+- Plotly `add_vline`/`add_hline` with `annotation_text` crashes on tz-aware pandas Timestamps — use `add_shape` + `add_annotation` instead
 
 ## ML Strategy
 
@@ -142,13 +145,16 @@ All keys stored in `.env`, loaded with `python-dotenv`. See `.env.example` for t
 
 ### Problem Definition
 
-- **Target:** Day-ahead electricity price (EUR/MWh) per bidding zone
+- **Targets:** Price (EUR/MWh), reservoir filling (%), load (MW), generation (MW), trade flows (MWh)
 - **Granularity:** Hourly (transitioning to 15-min in 2025)
-- **Forecast horizon:** 24 hours ahead (matching Nord Pool day-ahead auction)
-- **Zones:** NO1–NO5 (train separate models per zone, or one model with zone as feature)
-- **Train period:** 2017–2023 (7 years)
-- **Test period:** 2024
-- **Validation:** Walk-forward with expanding or sliding window (never random split)
+- **Forecast horizon:** 24 hours ahead (matching Nord Pool day-ahead auction) + ~9 days via Yr weather
+- **Zones:** NO1–NO5 (separate models per zone)
+- **Train period:** 2022-01-01 to 2024-12-31 (~26,280 hours)
+- **Validation period:** 2025-01-01 to 2025-06-30 (~4,344 hours)
+- **Test period:** 2025-07-01 to 2026-02-22
+- **Walk-forward:** 6-fold expanding window, 720 hours (~1 month) per fold
+- **Approach:** Fundamentals-only (no price lag features — model learns from physical drivers)
+- **Validation:** Walk-forward with expanding window (never random split)
 
 ### Evaluation Metrics
 
@@ -610,10 +616,10 @@ and Norwegian-specific gotchas that are easy to get wrong without the reference.
 
 ## Current Phase
 
-**Phase 1: Data Foundation** — COMPLETE
+**Phase 7: Complete** — ALL PHASES IMPLEMENTED
 
-All data fetchers are implemented, tested, and caching to `data/raw/`.
-Nord Pool provides price data (no key needed), unblocking Phase 2.
+Full pipeline from data fetching through ML forecasting to dashboard.
+Data → Features → Models → Insights → Anomalies → Dashboard.
 
 ```
 ✅ Phase 0: Project setup
@@ -679,11 +685,19 @@ Nord Pool provides price data (no key needed), unblocking Phase 2.
    ✅ Note: PhysicalFlow returns aggregate net exchange only (no per-cable breakdown)
    ✅ Note: Download CSV endpoint returns empty — JSON endpoints used instead
 
+✅ Phase 1g: fetch_yr_forecast.py — Yr Locationforecast weather
+   ✅ Fetches ~9 days of weather forecasts from MET Norway (Yr/Locationforecast 2.0)
+   ✅ Per-zone station coordinates (same as Frost stations)
+   ✅ Variables: yr_temperature, yr_wind_speed, yr_precipitation_1h, yr_cloud_cover
+   ✅ fetch_yr_forecast(zone) + fetch_all_yr_forecasts() for all 5 zones
+   ✅ Caching support with TTL
+
 ✅ Phase 2: Feature engineering (build_features.py)
    ✅ Calendar, weather, commodity, FX, reservoir, Statnett features
    ✅ Nord Pool price features integrated (price_eur_mwh + lags/rolling/diff)
    ✅ EUR → NOK price conversion (price_nok_mwh, price_nok_kwh + full lag/rolling/diff)
-   ✅ All-zone orchestrator with Parquet caching (~45 features per zone)
+   ✅ ENTSO-E features: load, generation (hydro/wind/total), cross-border flows, internal flows
+   ✅ All-zone orchestrator with Parquet caching (~45–75 features per zone depending on cables)
 
 ✅ Phase 2.5: Statistical inference analysis (notebook 08)
    ✅ Price distribution analysis (Shapiro-Wilk, Anderson-Darling, KDE, QQ plots)
@@ -696,10 +710,67 @@ Nord Pool provides price data (no key needed), unblocking Phase 2.
    ✅ Autocorrelation & stationarity (ADF, KPSS, ACF/PACF up to 168h lags)
    ✅ Key findings compiled with modeling recommendations for Phase 3
 
-🔲 Phase 3: Forecasting nve 
-🔲 Phase 4: XGBoost / LightGBM / CatBoost / ensemble
-🔲 Phase 5: Streamlit dashboard (incl. Tab 5: Cable Arbitrage)
-🔲 Phase 6: Anomaly detection + Cable Arbitrage Analysis
+✅ Phase 3: ML model code + forecasting notebooks
+   ✅ 3.1: src/models/forecasters.py — NaiveForecaster, ARIMAForecaster, SARIMAXForecaster, STLForecaster, ETSForecaster
+   ✅ 3.2: src/models/train.py — MLPriceForecaster (XGBoost/LightGBM/CatBoost wrapper),
+     prepare_ml_features(), train_ensemble(), walk_forward_validate(), forecast_with_yr()
+   ✅ 3.3: src/models/evaluate.py — compute_metrics(), comparison_table(), plot_forecast(), plot_residuals()
+   ✅ 3.4: notebooks/09a_price_forecasting.ipynb — NO_5 price forecasting (fundamentals-only approach)
+     - Naive + SARIMA baselines, XGBoost/LightGBM/CatBoost/Ensemble
+     - Walk-forward (6-fold), SHAP analysis, Yr forward forecast (daily aggregation)
+     - Nord Pool patching for ENTSO-E gaps
+   ✅ 3.5: notebooks/09a_all_zones_price_forecasting.ipynb — All 5 zones price comparison
+     - Per-zone ML training, grand comparison table, SHAP heatmap
+     - 3-month historical + forward forecast overlay for all zones
+   ✅ 3.6: notebooks/09b_reservoir_forecasting.ipynb — Reservoir filling (%)
+     - Target: reservoir_filling_pct, leakage prevention (drops reservoir-derived features)
+     - Naive lag=52*168 (same week last year)
+   ✅ 3.7: notebooks/09c_demand_forecasting.ipynb — Electricity load (MW)
+     - Target: actual_load, leakage prevention (drops load_lag_* features)
+     - Yr forward forecast for load prediction
+   ✅ 3.8: notebooks/09d_production_forecasting.ipynb — Generation (MW)
+     - Three targets: generation_total, generation_hydro, generation_wind
+     - Separate leakage prevention per target
+   ✅ 3.9: notebooks/09e_trade_flow_forecasting.ipynb — Net exchange (MWh)
+     - Target: net_exchange_mwh, leakage prevention (drops net_balance_mwh)
+
+   ✅ 3.10: notebooks/09f_multi_target_var.ipynb — Multi-target VAR integration
+     - 5 targets: price, load, hydro gen, reservoir, net export
+     - Granger causality, IRF, FEVD, comparison vs individual models
+
+✅ Phase 4: Optuna hyperparameter tuning + advanced ensembles
+   ✅ notebooks/10_optuna_tuning.ipynb — Optuna search (50 trials × 3 models)
+   ✅ XGBoost/LightGBM/CatBoost objective functions with TimeSeriesSplit CV
+   ✅ Default vs tuned comparison, tuned ensemble, walk-forward validation
+   ✅ Per-zone tuning analysis (NO_5 vs NO_2)
+   ✅ requirements.txt updated with optuna>=3.0
+
+✅ Phase 5: ML Insights — Forstå kraftmarkedet
+   ✅ notebooks/11_ml_market_insights.ipynb
+   ✅ Cross-target SHAP importance heatmap (5 targets)
+   ✅ Causal chain analysis (weather → reservoir → production → price)
+   ✅ Zone market structure (North-South divide by feature category)
+   ✅ Scenario analysis (temperature, reservoir, gas, wind per zone)
+   ✅ Markov regime detection per zone
+   ✅ Model reliability: error patterns, ensemble disagreement as uncertainty
+
+✅ Phase 6: Anomaly detection + Cable Arbitrage
+   ✅ src/anomaly/__init__.py, cable_arbitrage.py, detector.py
+   ✅ notebooks/12_cable_arbitrage.ipynb — wrong-direction flows, capacity util, revenue
+   ✅ notebooks/13_anomaly_detection.ipynb — spikes, regimes, forecast errors, multivariate
+   ✅ Cable analysis: compute_cable_spreads, detect_wrong_direction_flows, build_cable_analysis
+   ✅ Anomaly detection: price spikes (zscore/IQR/rolling), Isolation Forest, regime transitions
+
+✅ Phase 7: Streamlit dashboard (7 tabs)
+   ✅ app/streamlit_app.py — full 7-tab dashboard
+   ✅ src/models/predict.py — inference pipeline (load_zone_model, predict_forward)
+   ✅ Tab 1: Overview (current prices, 7-day history, zone comparison)
+   ✅ Tab 2: Price Forecast (historical + Yr-based forward forecast)
+   ✅ Tab 3: Demand/Production (load, generation mix, supply-demand balance)
+   ✅ Tab 4: Reservoir (NVE filling, benchmarks, deviation analysis)
+   ✅ Tab 5: Cable Arbitrage (cross-border flows, price spreads)
+   ✅ Tab 6: Market Insights (feature importance, scenarios, distribution)
+   ✅ Tab 7: Model Performance (availability, validation metrics, residuals)
 ```
 
 ## Claude Code Workflow
@@ -748,24 +819,44 @@ I'll explain the concept, then we implement together.
 
 ## Current Status
 
-- [x] Project structure created
-- [x] CLAUDE.md, GUIDE.md, and project config
-- [x] API reference docs (ENTSO-E, Frost, CommodityPriceAPI, NVE Magasin, Statnett)
+**Data & Features (Phase 0–2):**
+- [x] Project structure, CLAUDE.md, GUIDE.md, API reference docs
 - [x] fetch_metro.py — weather data (Frost API), tested with Bergen 2020–2026
 - [x] fetch_fx.py — EUR/NOK exchange rates (Norges Bank), tested 2020–2026
 - [x] fetch_commodity.py — gas/oil/coal (yfinance + CommodityPriceAPI), tested 2020–2026
 - [x] fetch_nordpool.py — day-ahead prices via hvakosterstrommen.no (free, no auth, Oct 2021+)
-- [x] fetch_electricity.py — ENTSO-E prices/load/generation/flows (fully tested, all endpoints working)
+- [x] fetch_electricity.py — ENTSO-E prices/load/generation/flows (fully tested, all endpoints)
 - [x] fetch_reservoir.py — NVE reservoir filling per zone, tested with Bergen 2020–2026
 - [x] fetch_statnett.py — physical flows, prod/cons, overview, power situation, frequency
-- [x] build_features.py — feature engineering with Nord Pool price integration
+- [x] fetch_yr_forecast.py — Yr Locationforecast weather (~9 days ahead, per zone)
+- [x] build_features.py — feature engineering with all data sources (~45–75 features per zone)
 - [x] Notebook 08 — Statistical inference analysis (distributions, STL, Granger, OLS, ADF/KPSS, ACF/PACF)
-- [x] ENTSO-E API key obtained — load, generation, cross-border flows now available
-- [ ] Baseline models (naive + linear regression)
-- [ ] Model training (XGBoost / LightGBM / CatBoost → ensemble)
-- [ ] Streamlit dashboard
-- [ ] Cable arbitrage analysis
-- [ ] Anomaly detection
+
+**ML Models & Forecasting (Phase 3):**
+- [x] src/models/forecasters.py — statistical forecasters (Naive, ARIMA, SARIMA, STL, ETS)
+- [x] src/models/train.py — MLPriceForecaster, train_ensemble, walk_forward_validate, forecast_with_yr
+- [x] src/models/evaluate.py — compute_metrics, comparison_table, plot_forecast, plot_residuals
+- [x] 09a: Price forecasting (NO_5) — XGBoost/LightGBM/CatBoost/Ensemble + SHAP + Yr forward forecast
+- [x] 09a_all_zones: Price forecasting (all 5 zones) — grand comparison + forward forecast overlay
+- [x] 09b: Reservoir forecasting — reservoir_filling_pct with leakage prevention
+- [x] 09c: Demand forecasting — actual_load (MW) with Yr forward forecast
+- [x] 09d: Production forecasting — generation_total/hydro/wind (3 sub-targets)
+- [x] 09e: Trade flow forecasting — net_exchange_mwh
+- [x] 09f: Multi-target VAR integration — VAR model, Granger causality, IRF, FEVD
+
+**Tuning & Insights (Phases 4-5):**
+- [x] 10: Optuna hyperparameter tuning — 50 trials × 3 models, default vs tuned comparison
+- [x] 11: ML market insights — cross-target SHAP, causal chains, scenarios, regime detection
+
+**Anomaly Detection (Phase 6):**
+- [x] src/anomaly/cable_arbitrage.py — wrong-direction flows, arbitrage revenue
+- [x] src/anomaly/detector.py — price spikes, forecast anomalies, Isolation Forest, regime transitions
+- [x] 12: Cable arbitrage notebook — per-cable analysis, capacity utilization, revenue
+- [x] 13: Anomaly detection notebook — multi-method spike detection, cross-zone coincidence
+
+**Dashboard (Phase 7):**
+- [x] app/streamlit_app.py — 7-tab Streamlit dashboard
+- [x] src/models/predict.py — inference pipeline (load models, forward forecast, caching)
 
 ## Reference
 
