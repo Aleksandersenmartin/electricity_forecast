@@ -47,6 +47,32 @@ ZONE_EMOJI = {
     "NO_1": "🏙️", "NO_2": "🌊", "NO_3": "⚓", "NO_4": "🌌", "NO_5": "🌧️",
 }
 
+ZONE_COORDS = {
+    "NO_1": {"lat": 59.94, "lon": 10.72},
+    "NO_2": {"lat": 58.20, "lon": 8.08},
+    "NO_3": {"lat": 63.41, "lon": 10.45},
+    "NO_4": {"lat": 69.65, "lon": 18.96},
+    "NO_5": {"lat": 60.38, "lon": 5.33},
+}
+FOREIGN_COORDS = {
+    "dk1":  {"lat": 56.0, "lon": 9.5, "name": "Denmark (DK1)"},
+    "nl":   {"lat": 52.3, "lon": 4.9, "name": "Netherlands"},
+    "delu": {"lat": 53.5, "lon": 10.0, "name": "Germany"},
+    "gb":   {"lat": 54.5, "lon": -1.5, "name": "Great Britain"},
+    "se1":  {"lat": 67.0, "lon": 20.5, "name": "Sweden (SE1)"},
+    "se2":  {"lat": 63.0, "lon": 17.0, "name": "Sweden (SE2)"},
+    "se3":  {"lat": 59.3, "lon": 18.0, "name": "Sweden (SE3)"},
+    "fi":   {"lat": 64.0, "lon": 26.0, "name": "Finland"},
+}
+# Cross-border cable columns per zone: (col_suffix, foreign_key)
+CROSS_BORDER_CABLES = {
+    "NO_1": [("se3", "se3")],
+    "NO_2": [("dk1", "dk1"), ("nl", "nl"), ("delu", "delu"), ("gb", "gb")],
+    "NO_3": [("se2", "se2")],
+    "NO_4": [("se1", "se1"), ("se2", "se2"), ("fi", "fi")],
+    "NO_5": [],
+}
+
 COLOR_POSITIVE = "#51CF66"
 COLOR_NEGATIVE = "#FF6B6B"
 COLOR_ACCENT = "#4A9EFF"
@@ -335,6 +361,240 @@ def align_features(X: pd.DataFrame, model) -> pd.DataFrame:
 def section_spacer() -> None:
     """Render a styled section divider."""
     st.markdown('<div class="section-spacer"></div>', unsafe_allow_html=True)
+
+
+def build_flow_map(
+    zone_data: dict[str, pd.DataFrame],
+    selected_zone: str,
+) -> go.Figure | None:
+    """Build interactive Scattergeo map of Norwegian power grid flows.
+
+    Shows zone nodes sized by load, cross-border flow lines colored by
+    direction (green=export, red=import), and internal flow lines.
+    Uses the latest hourly snapshot from each zone's feature data.
+
+    Args:
+        zone_data: Dict mapping zone name to its feature DataFrame.
+        selected_zone: Currently selected zone (highlighted on map).
+
+    Returns:
+        Plotly Figure with the flow map, or None if insufficient data.
+    """
+    if not zone_data:
+        return None
+
+    fig = go.Figure()
+
+    # --- Collect latest cross-border flow snapshot ---
+    cb_flows: list[dict] = []
+    for zone, cables in CROSS_BORDER_CABLES.items():
+        if zone not in zone_data:
+            continue
+        df = zone_data[zone]
+        for col_suffix, foreign_key in cables:
+            col_name = f"flow_{zone.lower()}_{col_suffix}"
+            if col_name not in df.columns:
+                continue
+            val = df[col_name].dropna()
+            if val.empty:
+                continue
+            cb_flows.append({
+                "zone": zone,
+                "foreign_key": foreign_key,
+                "flow_mw": float(val.iloc[-1]),
+            })
+
+    # --- Collect latest internal flows (deduplicated) ---
+    internal_flows: list[tuple[str, str, float]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for zone in ZONES:
+        if zone not in zone_data:
+            continue
+        df = zone_data[zone]
+        for col in df.columns:
+            if not col.startswith("flow_from_"):
+                continue
+            neighbor = col.replace("flow_from_", "").upper()
+            pair = tuple(sorted([zone, neighbor]))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            val = df[col].dropna()
+            if val.empty:
+                continue
+            # flow_from_X in zone Y: positive = X→Y
+            internal_flows.append((neighbor, zone, float(val.iloc[-1])))
+
+    # --- Legend-only invisible traces ---
+    fig.add_trace(go.Scattergeo(
+        lat=[None], lon=[None], mode="markers",
+        marker=dict(size=8, color=COLOR_POSITIVE),
+        name="Export (from Norway)",
+    ))
+    fig.add_trace(go.Scattergeo(
+        lat=[None], lon=[None], mode="markers",
+        marker=dict(size=8, color=COLOR_NEGATIVE),
+        name="Import (to Norway)",
+    ))
+    fig.add_trace(go.Scattergeo(
+        lat=[None], lon=[None], mode="markers",
+        marker=dict(size=8, color="rgba(255,255,255,0.35)"),
+        name="Internal flow",
+    ))
+
+    # --- Plot internal flow lines (dimmer, behind everything) ---
+    for from_z, to_z, mw in internal_flows:
+        c_from = ZONE_COORDS.get(from_z)
+        c_to = ZONE_COORDS.get(to_z)
+        if not c_from or not c_to:
+            continue
+        width = max(0.8, min(4, abs(mw) / 400))
+        if mw >= 0:
+            label = f"{from_z} → {to_z}: {abs(mw):,.0f} MW"
+        else:
+            label = f"{to_z} → {from_z}: {abs(mw):,.0f} MW"
+        fig.add_trace(go.Scattergeo(
+            lat=[c_from["lat"], c_to["lat"]],
+            lon=[c_from["lon"], c_to["lon"]],
+            mode="lines",
+            line=dict(width=width, color="rgba(255,255,255,0.20)"),
+            hoverinfo="text",
+            text=[label, label],
+            showlegend=False,
+            opacity=0.6,
+        ))
+
+    # --- Plot cross-border flow lines ---
+    for flow in cb_flows:
+        zone = flow["zone"]
+        fk = flow["foreign_key"]
+        mw = flow["flow_mw"]
+        if fk not in FOREIGN_COORDS:
+            continue
+        zc = ZONE_COORDS[zone]
+        fc = FOREIGN_COORDS[fk]
+        is_export = mw > 0
+        color = COLOR_POSITIVE if is_export else COLOR_NEGATIVE
+        direction = "Export" if is_export else "Import"
+        width = max(1, min(5, abs(mw) / 400))
+        label = f"{zone} ↔ {FOREIGN_COORDS[fk]['name']}<br>{direction}: {abs(mw):,.0f} MW"
+        fig.add_trace(go.Scattergeo(
+            lat=[zc["lat"], fc["lat"]],
+            lon=[zc["lon"], fc["lon"]],
+            mode="lines",
+            line=dict(width=width, color=color),
+            hoverinfo="text",
+            text=[label, label],
+            showlegend=False,
+            opacity=0.75,
+        ))
+
+    # --- Plot foreign zone nodes (small diamonds) ---
+    plotted_foreign: set[str] = set()
+    for flow in cb_flows:
+        fk = flow["foreign_key"]
+        if fk in plotted_foreign or fk not in FOREIGN_COORDS:
+            continue
+        plotted_foreign.add(fk)
+        fc = FOREIGN_COORDS[fk]
+        fig.add_trace(go.Scattergeo(
+            lat=[fc["lat"]], lon=[fc["lon"]],
+            text=[fc["name"]],
+            hoverinfo="text",
+            mode="markers+text",
+            marker=dict(size=9, color="rgba(255,255,255,0.45)", symbol="diamond"),
+            textfont=dict(size=9, color="rgba(255,255,255,0.5)"),
+            textposition="top center",
+            showlegend=False,
+        ))
+
+    # --- Plot Norwegian zone nodes ---
+    for zone in ZONES:
+        coords = ZONE_COORDS[zone]
+        load_mw = None
+        gen_mw = None
+        if zone in zone_data:
+            df = zone_data[zone]
+            if "actual_load" in df.columns:
+                s = df["actual_load"].dropna()
+                if not s.empty:
+                    load_mw = float(s.iloc[-1])
+            if "generation_total" in df.columns:
+                s = df["generation_total"].dropna()
+                if not s.empty:
+                    gen_mw = float(s.iloc[-1])
+
+        marker_size = 20
+        if load_mw is not None:
+            marker_size = max(16, min(38, 16 + load_mw / 400))
+
+        hover_parts = [f"<b>{zone} ({ZONE_SHORT[zone]})</b>"]
+        if load_mw is not None:
+            hover_parts.append(f"Load: {load_mw:,.0f} MW")
+        if gen_mw is not None:
+            hover_parts.append(f"Generation: {gen_mw:,.0f} MW")
+        is_selected = zone == selected_zone
+        fig.add_trace(go.Scattergeo(
+            lat=[coords["lat"]], lon=[coords["lon"]],
+            text=["<br>".join(hover_parts)],
+            hoverinfo="text",
+            marker=dict(
+                size=marker_size,
+                color=ZONE_COLORS[zone],
+                line=dict(
+                    width=3 if is_selected else 1,
+                    color="white" if is_selected else "rgba(255,255,255,0.3)",
+                ),
+                opacity=1.0 if is_selected else 0.85,
+            ),
+            showlegend=False,
+        ))
+        # Zone label
+        fig.add_trace(go.Scattergeo(
+            lat=[coords["lat"] + 0.6], lon=[coords["lon"]],
+            text=[zone], mode="text",
+            textfont=dict(
+                size=11 if is_selected else 10,
+                color=ZONE_COLORS[zone],
+            ),
+            showlegend=False,
+            hoverinfo="skip",
+        ))
+
+    # --- Map layout ---
+    fig.update_layout(
+        geo=dict(
+            scope="europe",
+            projection_type="natural earth",
+            showland=True,
+            landcolor="rgb(30, 33, 48)",
+            showocean=True,
+            oceancolor="rgb(14, 17, 23)",
+            showcountries=True,
+            countrycolor="rgba(255,255,255,0.08)",
+            showlakes=True,
+            lakecolor="rgb(14, 17, 23)",
+            center=dict(lat=62, lon=12),
+            lonaxis=dict(range=[-5, 32]),
+            lataxis=dict(range=[50, 72]),
+        ),
+        template="plotly_dark",
+        font=CHART_FONT,
+        height=550,
+        margin=dict(l=0, r=0, t=30, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.0,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+    )
+
+    return fig
 
 
 def sidebar_card(label: str, value: str, delta: str = "") -> str:
@@ -950,6 +1210,75 @@ with tab5:
         '</div>',
         unsafe_allow_html=True,
     )
+
+    # --- Interactive flow map (all zones) ---
+    zone_data_map = load_all_features()
+    if zone_data_map:
+        fig_map = build_flow_map(zone_data_map, selected_zone)
+        if fig_map is not None:
+            # Find timestamp of the snapshot
+            snap_ts = None
+            if selected_zone in zone_data_map:
+                snap_ts = zone_data_map[selected_zone].index[-1]
+            snap_label = snap_ts.strftime("%Y-%m-%d %H:%M") if snap_ts is not None else "latest"
+            st.markdown(
+                f"#### Power Flow Map"
+                f'<span style="color: rgba(255,255,255,0.35); font-size: 0.8rem; margin-left: 0.7rem;">'
+                f"Snapshot: {snap_label}</span>",
+                unsafe_allow_html=True,
+            )
+
+            # Summary cards: Total Export, Total Import, Net Position
+            total_export = 0.0
+            total_import = 0.0
+            for zone_key, cables in CROSS_BORDER_CABLES.items():
+                if zone_key not in zone_data_map:
+                    continue
+                df_z = zone_data_map[zone_key]
+                for col_suffix, _ in cables:
+                    col_name = f"flow_{zone_key.lower()}_{col_suffix}"
+                    if col_name in df_z.columns:
+                        val = df_z[col_name].dropna()
+                        if not val.empty:
+                            mw = float(val.iloc[-1])
+                            if mw > 0:
+                                total_export += mw
+                            else:
+                                total_import += abs(mw)
+
+            card_cols = st.columns(3)
+            with card_cols[0]:
+                st.markdown(
+                    f'<div class="sidebar-card" style="border-left: 3px solid {COLOR_POSITIVE};">'
+                    f'<div class="card-label">Total Cross-Border Export</div>'
+                    f'<div class="card-value" style="color: {COLOR_POSITIVE};">'
+                    f'{total_export:,.0f} MW</div></div>',
+                    unsafe_allow_html=True,
+                )
+            with card_cols[1]:
+                st.markdown(
+                    f'<div class="sidebar-card" style="border-left: 3px solid {COLOR_NEGATIVE};">'
+                    f'<div class="card-label">Total Cross-Border Import</div>'
+                    f'<div class="card-value" style="color: {COLOR_NEGATIVE};">'
+                    f'{total_import:,.0f} MW</div></div>',
+                    unsafe_allow_html=True,
+                )
+            with card_cols[2]:
+                net = total_export - total_import
+                net_color = COLOR_POSITIVE if net >= 0 else COLOR_NEGATIVE
+                net_label = "Net Exporter" if net >= 0 else "Net Importer"
+                st.markdown(
+                    f'<div class="sidebar-card" style="border-left: 3px solid {net_color};">'
+                    f'<div class="card-label">Norway Net Position</div>'
+                    f'<div class="card-value" style="color: {net_color};">'
+                    f'{net_label}</div>'
+                    f'<div class="card-delta">{net:+,.0f} MW</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+            st.plotly_chart(fig_map, use_container_width=True)
+
+        section_spacer()
 
     df_zone = load_features(selected_zone)
     if df_zone is not None:
