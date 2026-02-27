@@ -355,12 +355,13 @@ def sidebar_card(label: str, value: str, delta: str = "") -> str:
 
 @st.cache_data(ttl=3600)
 def load_features(zone: str) -> pd.DataFrame | None:
-    """Load feature matrix for a zone, picking the newest file available."""
+    """Load feature matrix for a zone, picking the file with the latest end date."""
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    # Find all feature files for this zone, pick the most recently modified
+    # Find all feature files for this zone, sort by filename descending
+    # (filenames contain date ranges, so alphabetical = chronological)
     matches = sorted(
         Path(DATA_DIR).glob(f"features_{zone}_*.parquet"),
-        key=lambda p: p.stat().st_mtime,
+        key=lambda p: p.name,
         reverse=True,
     )
     if matches:
