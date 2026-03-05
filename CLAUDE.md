@@ -616,10 +616,11 @@ and Norwegian-specific gotchas that are easy to get wrong without the reference.
 
 ## Current Phase
 
-**Phase 7: Complete** — ALL PHASES IMPLEMENTED
+**Phase 3: Multi-target ML forecasting** — IN PROGRESS
 
-Full pipeline from data fetching through ML forecasting to dashboard.
-Data → Features → Models → Insights → Anomalies → Dashboard.
+All data fetchers, feature engineering, and statistical analysis complete.
+ML model code (`src/models/`) and forecasting notebooks (09a–09e) implemented.
+Tree-based models (XGBoost/LightGBM/CatBoost/Ensemble) trained and evaluated per target.
 
 ```
 ✅ Phase 0: Project setup
@@ -734,43 +735,23 @@ Data → Features → Models → Insights → Anomalies → Dashboard.
    ✅ 3.9: notebooks/09e_trade_flow_forecasting.ipynb — Net exchange (MWh)
      - Target: net_exchange_mwh, leakage prevention (drops net_balance_mwh)
 
-   ✅ 3.10: notebooks/09f_multi_target_var.ipynb — Multi-target VAR integration
-     - 5 targets: price, load, hydro gen, reservoir, net export
-     - Granger causality, IRF, FEVD, comparison vs individual models
+   🔲 3.10: Multi-target VAR integration (notebooks/09f_multi_target_var.ipynb)
 
-✅ Phase 4: Optuna hyperparameter tuning + advanced ensembles
-   ✅ notebooks/10_optuna_tuning.ipynb — Optuna search (50 trials × 3 models)
-   ✅ XGBoost/LightGBM/CatBoost objective functions with TimeSeriesSplit CV
-   ✅ Default vs tuned comparison, tuned ensemble, walk-forward validation
-   ✅ Per-zone tuning analysis (NO_5 vs NO_2)
-   ✅ requirements.txt updated with optuna>=3.0
+🔲 Phase 4: Optuna hyperparameter tuning + advanced ensembles
+   → Optuna hyperparameter search per target per zone
+   → SHAP deep dive per target, walk-forward grand comparison
+   → Stacking ensemble (meta-model on base predictions)
 
-✅ Phase 5: ML Insights — Forstå kraftmarkedet
-   ✅ notebooks/11_ml_market_insights.ipynb
-   ✅ Cross-target SHAP importance heatmap (5 targets)
-   ✅ Causal chain analysis (weather → reservoir → production → price)
-   ✅ Zone market structure (North-South divide by feature category)
-   ✅ Scenario analysis (temperature, reservoir, gas, wind per zone)
-   ✅ Markov regime detection per zone
-   ✅ Model reliability: error patterns, ensemble disagreement as uncertainty
+🔲 Phase 5: ML Insights — Forstå kraftmarkedet
+   → notebooks/10b_ml_market_insights.ipynb
+   → Cross-target feature importance, kausalkjede-analyse, scenario-analyse
 
-✅ Phase 6: Anomaly detection + Cable Arbitrage
-   ✅ src/anomaly/__init__.py, cable_arbitrage.py, detector.py
-   ✅ notebooks/12_cable_arbitrage.ipynb — wrong-direction flows, capacity util, revenue
-   ✅ notebooks/13_anomaly_detection.ipynb — spikes, regimes, forecast errors, multivariate
-   ✅ Cable analysis: compute_cable_spreads, detect_wrong_direction_flows, build_cable_analysis
-   ✅ Anomaly detection: price spikes (zscore/IQR/rolling), Isolation Forest, regime transitions
+🔲 Phase 6: Anomaly detection + Cable Arbitrage
+   → notebooks/11_anomaly_detection.ipynb — multi-target anomalier, regime-basert
+   → notebooks/12_cable_arbitrage.ipynb — wrong-direction flows, economic impact
+   → src/anomaly/cable_arbitrage.py
 
-✅ Phase 7: Streamlit dashboard (7 tabs)
-   ✅ app/streamlit_app.py — full 7-tab dashboard
-   ✅ src/models/predict.py — inference pipeline (load_zone_model, predict_forward)
-   ✅ Tab 1: Overview (current prices, 7-day history, zone comparison)
-   ✅ Tab 2: Price Forecast (historical + Yr-based forward forecast)
-   ✅ Tab 3: Demand/Production (load, generation mix, supply-demand balance)
-   ✅ Tab 4: Reservoir (NVE filling, benchmarks, deviation analysis)
-   ✅ Tab 5: Cable Arbitrage (cross-border flows, price spreads)
-   ✅ Tab 6: Market Insights (feature importance, scenarios, distribution)
-   ✅ Tab 7: Model Performance (availability, validation metrics, residuals)
+🔲 Phase 7: Streamlit dashboard (7 tabs)
 ```
 
 ## Claude Code Workflow
@@ -842,21 +823,13 @@ I'll explain the concept, then we implement together.
 - [x] 09c: Demand forecasting — actual_load (MW) with Yr forward forecast
 - [x] 09d: Production forecasting — generation_total/hydro/wind (3 sub-targets)
 - [x] 09e: Trade flow forecasting — net_exchange_mwh
-- [x] 09f: Multi-target VAR integration — VAR model, Granger causality, IRF, FEVD
+- [ ] 09f: Multi-target VAR integration
 
-**Tuning & Insights (Phases 4-5):**
-- [x] 10: Optuna hyperparameter tuning — 50 trials × 3 models, default vs tuned comparison
-- [x] 11: ML market insights — cross-target SHAP, causal chains, scenarios, regime detection
-
-**Anomaly Detection (Phase 6):**
-- [x] src/anomaly/cable_arbitrage.py — wrong-direction flows, arbitrage revenue
-- [x] src/anomaly/detector.py — price spikes, forecast anomalies, Isolation Forest, regime transitions
-- [x] 12: Cable arbitrage notebook — per-cable analysis, capacity utilization, revenue
-- [x] 13: Anomaly detection notebook — multi-method spike detection, cross-zone coincidence
-
-**Dashboard (Phase 7):**
-- [x] app/streamlit_app.py — 7-tab Streamlit dashboard
-- [x] src/models/predict.py — inference pipeline (load models, forward forecast, caching)
+**Remaining Phases:**
+- [ ] Optuna hyperparameter tuning (Phase 4)
+- [ ] ML market insights notebook (Phase 5)
+- [ ] Anomaly detection + Cable arbitrage (Phase 6)
+- [ ] Streamlit dashboard (Phase 7)
 
 ## Reference
 
